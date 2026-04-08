@@ -12,7 +12,10 @@ data class Event(
     val startDateTimeInMillis: Long,
     val hasEndTime: Boolean = false,
     val endDateTimeInMillis: Long? = null,
-    // --- Phase 3 Additions ---
-    val repeatMode: String = "None", // "None", "Daily", "Weekly", "Monthly", "Yearly"
-    val repeatDays: String? = null // Used for Weekly: e.g., "0,2,4" for Sun, Tue, Thu
+    val repeatMode: String = "None",
+    val repeatDays: String? = null,
+    // --- New Fields for the Premium UI ---
+    val notes: String? = null,
+    val location: String? = null,
+    val invitees: String? = null
 )

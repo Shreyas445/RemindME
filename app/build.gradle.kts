@@ -70,4 +70,5 @@ dependencies {
     // Glance for Widgets
     implementation("androidx.glance:glance-appwidget:$glanceVersion")
     implementation("androidx.glance:glance-material3:$glanceVersion")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 }
