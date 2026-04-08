@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,19 +15,26 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.glance.appwidget.GlanceAppWidgetManager
@@ -41,6 +49,7 @@ import com.example.remindme.widget.CountdownWidget
 import com.example.remindme.widget.WidgetUpdateWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
 class WidgetConfigActivity : ComponentActivity() {
@@ -49,6 +58,9 @@ class WidgetConfigActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        window.statusBarColor = android.graphics.Color.BLACK
+        window.navigationBarColor = android.graphics.Color.BLACK
 
         appWidgetId = intent?.extras?.getInt(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID) ?: AppWidgetManager.INVALID_APPWIDGET_ID
         setResult(RESULT_CANCELED, Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId))
@@ -64,7 +76,41 @@ class WidgetConfigActivity : ComponentActivity() {
             val themes = listOf("Dark", "Light", "Amber", "Transparent")
             var selectedTheme by remember { mutableStateOf(themes[0]) }
 
-            // Custom Theme States
+            // --- Animated Search States ---
+            var isSearchActive by remember { mutableStateOf(false) }
+            var searchQuery by remember { mutableStateOf("") }
+            val focusRequester = remember { FocusRequester() }
+
+            // --- NEW: Filter States (Same as Home Screen) ---
+            var selectedFilter by remember { mutableStateOf("Upcoming") }
+            val categories = listOf("Upcoming", "All", "Birthdays", "Events", "Exams", "Last Dates", "Other")
+
+            // --- Time-Travel Processing ---
+            val processedEvents = remember(events) {
+                events.map { event ->
+                    val nextDate = getNextOccurrence(event) // Borrowed from MainActivity
+                    event to nextDate
+                }.sortedBy { it.second }
+            }
+
+            val todayStart = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+
+            val filteredEvents = processedEvents.filter { (event, nextDate) ->
+                val matchesCategory = when (selectedFilter) {
+                    "Upcoming" -> nextDate >= todayStart
+                    "All" -> true
+                    else -> event.category == selectedFilter
+                }
+                val matchesSearch = event.title.contains(searchQuery, ignoreCase = true)
+                matchesCategory && matchesSearch
+            }
+
+            // --- Custom Theme States ---
             var showCustomDialog by remember { mutableStateOf(false) }
             var customBgColor by remember { mutableStateOf(Color(0xFF151515)) }
             var customTextColor by remember { mutableStateOf(Color.White) }
@@ -73,26 +119,88 @@ class WidgetConfigActivity : ComponentActivity() {
 
             MaterialTheme(colorScheme = darkColorScheme(background = PureBlack, surface = DarkGrayCard)) {
                 Surface(modifier = Modifier.fillMaxSize(), color = PureBlack) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text("Customize Widget", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(bottom = 24.dp))
 
-                        Text("1. Select an Event", color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
-                        if (events.isEmpty()) {
-                            Text("No events saved! Open the app to add one.", color = Color.Gray)
-                        } else {
-                            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(events) { event ->
-                                    val isSelected = selectedEventId == event.id
-                                    Card(
-                                        colors = CardDefaults.cardColors(containerColor = if (isSelected) CardOutline else DarkGrayCard),
-                                        border = if (isSelected) BorderStroke(2.dp, AccentColor) else null,
-                                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { selectedEventId = event.id }
-                                    ) {
-                                        Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                            Text(event.title, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                            if (isSelected) Icon(Icons.Filled.Check, contentDescription = null, tint = AccentColor)
+                    Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp)) {
+
+                        // --- Animated Header: Title vs Search Bar ---
+                        AnimatedContent(
+                            targetState = isSearchActive,
+                            label = "search_header_animation",
+                            modifier = Modifier.padding(bottom = 16.dp)
+                        ) { searchActive ->
+                            if (searchActive) {
+                                TextField(
+                                    value = searchQuery,
+                                    onValueChange = { searchQuery = it },
+                                    placeholder = { Text("Search events...", color = TextSecondary, fontSize = 18.sp) },
+                                    textStyle = LocalTextStyle.current.copy(fontSize = 18.sp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(focusRequester),
+                                    colors = TextFieldDefaults.colors(
+                                        focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                                        focusedIndicatorColor = AccentColor, unfocusedIndicatorColor = CardOutline,
+                                        cursorColor = AccentColor, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                                    ),
+                                    trailingIcon = {
+                                        IconButton(onClick = { isSearchActive = false; searchQuery = "" }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Close Search", tint = TextPrimary)
+                                        }
+                                    },
+                                    singleLine = true
+                                )
+                                LaunchedEffect(Unit) { focusRequester.requestFocus() }
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Customize Widget", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
+                                    if (events.isNotEmpty()) {
+                                        IconButton(onClick = { isSearchActive = true }) {
+                                            Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
                                         }
                                     }
+                                }
+                            }
+                        }
+
+                        // --- NEW: Category Filters ---
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 16.dp)) {
+                            items(categories) { category ->
+                                val isSelected = selectedFilter == category
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(if (isSelected) AccentColor else Color.Transparent)
+                                        .border(1.dp, if (isSelected) AccentColor else CardOutline, RoundedCornerShape(50))
+                                        .clickable { selectedFilter = category }
+                                        .padding(horizontal = 20.dp, vertical = 10.dp)
+                                ) { Text(category, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 14.sp) }
+                            }
+                        }
+
+                        Text("1. Select an Event", color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
+
+                        if (events.isEmpty()) {
+                            Text("No events saved! Open the app to add one.", color = Color.Gray)
+                        } else if (filteredEvents.isEmpty()) {
+                            Text("No events match your filter.", color = Color.Gray, modifier = Modifier.padding(top = 8.dp))
+                        } else {
+                            // --- Detailed Event Cards List ---
+                            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                                items(filteredEvents) { (event, nextDate) ->
+                                    val isSelected = selectedEventId == event.id
+
+                                    EventCard(
+                                        event = event,
+                                        nextDateMillis = nextDate,
+                                        isSelected = isSelected,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(24.dp))
+                                            .clickable { selectedEventId = event.id }
+                                    )
                                 }
                             }
                         }
@@ -119,7 +227,6 @@ class WidgetConfigActivity : ComponentActivity() {
                                 }
                             }
 
-                            // Custom Theme Button
                             item {
                                 Box(
                                     modifier = Modifier.size(60.dp).clip(CircleShape).background(CardOutline)
@@ -142,25 +249,23 @@ class WidgetConfigActivity : ComponentActivity() {
                                 }
                                 coroutineScope.launch(Dispatchers.IO) { saveWidgetConfiguration(selectedEventId!!, selectedTheme) }
                             },
-                            modifier = Modifier.fillMaxWidth().height(56.dp),
+                            modifier = Modifier.fillMaxWidth().height(56.dp).padding(bottom = 12.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = AccentColor),
                             shape = RoundedCornerShape(16.dp)
                         ) { Text("Add to Home Screen", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.Black) }
                     }
                 }
 
-                // Custom Theme Bottom Sheet Dialog
                 if (showCustomDialog) {
                     ModalBottomSheet(
                         onDismissRequest = { showCustomDialog = false },
                         containerColor = DarkGrayCard,
                         dragHandle = { BottomSheetDefaults.DragHandle(color = Color.Gray) }
                     ) {
-                        Column(modifier = Modifier.padding(24.dp).fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).fillMaxWidth().verticalScroll(rememberScrollState())) {
                             Text("Custom Theme Builder", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                            Spacer(modifier = Modifier.height(24.dp))
+                            Spacer(modifier = Modifier.height(16.dp))
 
-                            // Background Transparency
                             Text("Background Transparency", color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                             Slider(
                                 value = customBgAlpha,
@@ -169,11 +274,10 @@ class WidgetConfigActivity : ComponentActivity() {
                                 colors = SliderDefaults.colors(thumbColor = AccentColor, activeTrackColor = AccentColor, inactiveTrackColor = CardOutline)
                             )
 
-                            // Color Picker Helper Function
                             @Composable
                             fun ColorRow(label: String, selectedColor: Color, onColorSelected: (Color) -> Unit) {
                                 val palette = listOf(Color.White, Color.Black, Color(0xFF151515), Color(0xFFFFC107), Color(0xFFE91E63), Color(0xFF2196F3), Color(0xFF4CAF50), Color(0xFF9C27B0))
-                                Text(label, color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
+                                Text(label, color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     items(palette) { color ->
                                         Box(
@@ -189,11 +293,10 @@ class WidgetConfigActivity : ComponentActivity() {
                             ColorRow("Text Color", customTextColor) { customTextColor = it }
                             ColorRow("Accent Color (Days/Icons)", customAccentColor) { customAccentColor = it }
 
-                            Spacer(modifier = Modifier.height(32.dp))
+                            Spacer(modifier = Modifier.height(24.dp))
 
                             Button(
                                 onClick = {
-                                    // Construct the Hex String: Custom:#AARRGGBB,#AARRGGBB,#AARRGGBB
                                     val finalBg = customBgColor.copy(alpha = customBgAlpha)
                                     val hexBg = String.format("#%08X", finalBg.toArgb())
                                     val hexText = String.format("#%08X", customTextColor.toArgb())
@@ -207,7 +310,7 @@ class WidgetConfigActivity : ComponentActivity() {
                                 shape = RoundedCornerShape(16.dp)
                             ) { Text("Apply Custom Theme", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.Black) }
 
-                            Spacer(modifier = Modifier.height(24.dp))
+                            Spacer(modifier = Modifier.height(32.dp))
                         }
                     }
                 }

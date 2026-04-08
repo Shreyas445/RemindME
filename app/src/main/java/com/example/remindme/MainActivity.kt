@@ -22,6 +22,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -46,13 +48,53 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
-// --- Premium Dark Theme Palette ---
 val PureBlack = Color(0xFF000000)
-val DarkGrayCard = Color(0xFF141414) // Deeper, richer card color
+val DarkGrayCard = Color(0xFF141414)
 val CardOutline = Color(0xFF262626)
-val AccentColor = Color(0xFFFFC107) // Amber/Yellow
-val TextPrimary = Color(0xFFF5F5F5) // Off-white for better eye comfort
+val AccentColor = Color(0xFFFFC107)
+val TextPrimary = Color(0xFFF5F5F5)
 val TextSecondary = Color(0xFFA0A0A0)
+val SuccessGreen = Color(0xFF4CAF50)
+
+// --- THE TIME-TRAVEL ENGINE ---
+fun getNextOccurrence(event: Event): Long {
+    if (event.repeatMode == "None" || event.repeatMode == "Don't repeat") {
+        return event.startDateTimeInMillis
+    }
+
+    val calendar = Calendar.getInstance()
+    calendar.timeInMillis = event.startDateTimeInMillis
+    val now = System.currentTimeMillis()
+
+    if (calendar.timeInMillis > now) return calendar.timeInMillis
+
+    while (calendar.timeInMillis <= now) {
+        when (event.repeatMode) {
+            "Daily" -> calendar.add(Calendar.DAY_OF_YEAR, 1)
+            "Weekly" -> {
+                if (event.repeatDays.isNullOrBlank()) {
+                    calendar.add(Calendar.WEEK_OF_YEAR, 1)
+                } else {
+                    val activeDays = event.repeatDays.split(",").mapNotNull { it.toIntOrNull() }
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                    if (activeDays.isNotEmpty()) {
+                        var safetyCount = 0
+                        while (!activeDays.contains(calendar.get(Calendar.DAY_OF_WEEK) - 1) && safetyCount < 7) {
+                            calendar.add(Calendar.DAY_OF_YEAR, 1)
+                            safetyCount++
+                        }
+                    } else {
+                        calendar.add(Calendar.WEEK_OF_YEAR, 1)
+                    }
+                }
+            }
+            "Monthly" -> calendar.add(Calendar.MONTH, 1)
+            "Yearly" -> calendar.add(Calendar.YEAR, 1)
+            else -> break
+        }
+    }
+    return calendar.timeInMillis
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,19 +141,48 @@ fun RemindMeApp(dao: EventDao) {
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(navController: NavController, dao: EventDao) {
-    val events by dao.getAllEventsFlow().collectAsState(initial = emptyList())
+    val rawEvents by dao.getAllEventsFlow().collectAsState(initial = emptyList())
     val coroutineScope = rememberCoroutineScope()
-    val haptic = LocalHapticFeedback.current // For premium touch feedback
+    val haptic = LocalHapticFeedback.current
 
     var selectedEventIds by remember { mutableStateOf(setOf<Int>()) }
     var showDeleteDialog by remember { mutableStateOf(false) }
 
-    var selectedFilter by remember { mutableStateOf("All") }
-    val categories = listOf("All", "Birthdays", "Events", "Exams", "Last Dates", "Other")
+    var isSearchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+
+    // --- NEW: 'Upcoming' is the default filter ---
+    var selectedFilter by remember { mutableStateOf("Upcoming") }
+    val categories = listOf("Upcoming", "All", "Birthdays", "Events", "Exams", "Last Dates", "Other")
     var isMenuExpanded by remember { mutableStateOf(false) }
 
     val isSelectionMode = selectedEventIds.isNotEmpty()
-    val filteredEvents = if (selectedFilter == "All") events else events.filter { it.category == selectedFilter }
+
+    val processedEvents = remember(rawEvents) {
+        rawEvents.map { event ->
+            val nextDate = getNextOccurrence(event)
+            event to nextDate
+        }.sortedBy { it.second }
+    }
+
+    // Determine when "Today" started at exactly 00:00:00 for the Upcoming filter
+    val todayStart = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    val filteredEvents = processedEvents.filter { (event, nextDate) ->
+        val matchesCategory = when (selectedFilter) {
+            "Upcoming" -> nextDate >= todayStart // Hides yesterday and older
+            "All" -> true // Shows literally everything
+            else -> event.category == selectedFilter
+        }
+        val matchesSearch = event.title.contains(searchQuery, ignoreCase = true)
+        matchesCategory && matchesSearch
+    }
 
     if (showDeleteDialog) {
         AlertDialog(
@@ -128,29 +199,19 @@ fun HomeScreen(navController: NavController, dao: EventDao) {
                     }
                 }) { Text("Delete", color = Color(0xFFFF5252), fontWeight = FontWeight.Bold) }
             },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel", color = TextPrimary) }
-            }
+            dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel", color = TextPrimary) } }
         )
     }
 
     Scaffold(
         containerColor = PureBlack,
         topBar = {
-            AnimatedVisibility(
-                visible = isSelectionMode,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
+            AnimatedVisibility(visible = isSelectionMode, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 TopAppBar(
                     title = { Text("${selectedEventIds.size} Selected", color = TextPrimary, fontWeight = FontWeight.Bold) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = CardOutline),
-                    navigationIcon = {
-                        IconButton(onClick = { selectedEventIds = emptySet() }) { Icon(Icons.Default.Close, contentDescription = "Cancel", tint = TextPrimary) }
-                    },
-                    actions = {
-                        IconButton(onClick = { showDeleteDialog = true }) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF5252)) }
-                    }
+                    navigationIcon = { IconButton(onClick = { selectedEventIds = emptySet() }) { Icon(Icons.Default.Close, "Cancel", tint = TextPrimary) } },
+                    actions = { IconButton(onClick = { showDeleteDialog = true }) { Icon(Icons.Default.Delete, "Delete", tint = Color(0xFFFF5252)) } }
                 )
             }
         },
@@ -169,82 +230,76 @@ fun HomeScreen(navController: NavController, dao: EventDao) {
 
             AnimatedVisibility(visible = !isSelectionMode) {
                 Column {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Remind Me", fontSize = 34.sp, fontWeight = FontWeight.Black, color = TextPrimary, letterSpacing = (-1).sp)
-                        Box {
-                            IconButton(onClick = { isMenuExpanded = true }) { Icon(Icons.Default.MoreVert, "Menu", tint = TextPrimary) }
-                            DropdownMenu(expanded = isMenuExpanded, onDismissRequest = { isMenuExpanded = false }, modifier = Modifier.background(DarkGrayCard)) {
-                                DropdownMenuItem(
-                                    text = { Text("Settings", color = TextPrimary) },
-                                    onClick = { isMenuExpanded = false; navController.navigate("settings") },
-                                    leadingIcon = { Icon(Icons.Default.Settings, null, tint = TextSecondary) }
-                                )
+                    AnimatedContent(
+                        targetState = isSearchActive,
+                        label = "search_header_animation",
+                        modifier = Modifier.padding(top = 16.dp)
+                    ) { searchActive ->
+                        if (searchActive) {
+                            TextField(
+                                value = searchQuery, onValueChange = { searchQuery = it },
+                                placeholder = { Text("Search events...", color = TextSecondary, fontSize = 18.sp) },
+                                textStyle = LocalTextStyle.current.copy(fontSize = 18.sp),
+                                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                                    focusedIndicatorColor = AccentColor, unfocusedIndicatorColor = CardOutline,
+                                    cursorColor = AccentColor, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                                ),
+                                trailingIcon = { IconButton(onClick = { isSearchActive = false; searchQuery = "" }) { Icon(Icons.Default.Close, "Close Search", tint = TextPrimary) } },
+                                singleLine = true
+                            )
+                            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+                        } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().height(56.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Remind Me", fontSize = 34.sp, fontWeight = FontWeight.Black, color = TextPrimary, letterSpacing = (-1).sp)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { isSearchActive = true }) { Icon(Icons.Default.Search, "Search", tint = TextPrimary) }
+                                    Box {
+                                        IconButton(onClick = { isMenuExpanded = true }) { Icon(Icons.Default.MoreVert, "Menu", tint = TextPrimary) }
+                                        DropdownMenu(expanded = isMenuExpanded, onDismissRequest = { isMenuExpanded = false }, modifier = Modifier.background(DarkGrayCard)) {
+                                            DropdownMenuItem(text = { Text("Settings", color = TextPrimary) }, onClick = { isMenuExpanded = false; navController.navigate("settings") }, leadingIcon = { Icon(Icons.Default.Settings, null, tint = TextSecondary) })
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
 
-                    // Premium Pill Filters
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 20.dp, bottom = 12.dp)) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 16.dp, bottom = 12.dp)) {
                         items(categories) { category ->
                             val isSelected = selectedFilter == category
                             Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50))
-                                    .background(if (isSelected) AccentColor else Color.Transparent)
-                                    .border(1.dp, if (isSelected) AccentColor else CardOutline, RoundedCornerShape(50))
-                                    .clickable { selectedFilter = category }
-                                    .padding(horizontal = 20.dp, vertical = 10.dp)
-                            ) {
-                                Text(category, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 14.sp)
-                            }
+                                modifier = Modifier.clip(RoundedCornerShape(50)).background(if (isSelected) AccentColor else Color.Transparent).border(1.dp, if (isSelected) AccentColor else CardOutline, RoundedCornerShape(50)).clickable { selectedFilter = category }.padding(horizontal = 20.dp, vertical = 10.dp)
+                            ) { Text(category, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 14.sp) }
                         }
                     }
                 }
             }
 
             if (filteredEvents.isEmpty()) {
-                // Premium Empty State
-                Column(
-                    modifier = Modifier.fillMaxSize().weight(1f),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(Icons.Outlined.CalendarToday, contentDescription = null, modifier = Modifier.size(80.dp), tint = CardOutline)
+                Column(modifier = Modifier.fillMaxSize().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(Icons.Outlined.CalendarToday, null, modifier = Modifier.size(80.dp), tint = CardOutline)
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text("Clear Schedule", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    Text(if (searchQuery.isNotEmpty()) "No results found" else "Clear Schedule", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("You have no upcoming events in this category.\nTap + to create one.", fontSize = 14.sp, color = TextSecondary, textAlign = TextAlign.Center, lineHeight = 20.sp)
+                    Text(if (searchQuery.isNotEmpty()) "Try a different search term." else "You have no events matching this filter.\nTap + to create one.", fontSize = 14.sp, color = TextSecondary, textAlign = TextAlign.Center, lineHeight = 20.sp)
                 }
             } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.weight(1f).padding(top = 8.dp),
-                    contentPadding = PaddingValues(bottom = 80.dp) // Space for FAB
-                ) {
-                    items(filteredEvents) { event ->
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.weight(1f).padding(top = 8.dp), contentPadding = PaddingValues(bottom = 80.dp)) {
+                    items(filteredEvents) { (event, nextDate) ->
                         val isSelected = selectedEventIds.contains(event.id)
                         EventCard(
                             event = event,
+                            nextDateMillis = nextDate,
                             isSelected = isSelected,
-                            modifier = Modifier
-                                .animateContentSize()
-                                .combinedClickable(
-                                    onClick = {
-                                        if (isSelectionMode) {
-                                            selectedEventIds = if (isSelected) selectedEventIds - event.id else selectedEventIds + event.id
-                                        } else {
-                                            navController.navigate("details/${event.id}")
-                                        }
-                                    },
-                                    onLongClick = {
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        selectedEventIds = if (isSelected) selectedEventIds - event.id else selectedEventIds + event.id
-                                    }
-                                )
+                            modifier = Modifier.animateContentSize().combinedClickable(
+                                onClick = { if (isSelectionMode) { selectedEventIds = if (isSelected) selectedEventIds - event.id else selectedEventIds + event.id } else { navController.navigate("details/${event.id}") } },
+                                onLongClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); selectedEventIds = if (isSelected) selectedEventIds - event.id else selectedEventIds + event.id }
+                            )
                         )
                     }
                 }
@@ -254,48 +309,55 @@ fun HomeScreen(navController: NavController, dao: EventDao) {
 }
 
 @Composable
-fun EventCard(event: Event, isSelected: Boolean, modifier: Modifier = Modifier) {
+fun EventCard(event: Event, nextDateMillis: Long, isSelected: Boolean, modifier: Modifier = Modifier) {
     val formatter = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
-    val dateString = formatter.format(Date(event.startDateTimeInMillis))
-    val diff = event.startDateTimeInMillis - System.currentTimeMillis()
-    val daysLeft = if (diff > 0) (diff / (1000 * 60 * 60 * 24)).toString() else "0"
+    val dateString = formatter.format(Date(nextDateMillis))
+
+    val today = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+    val targetDate = Calendar.getInstance().apply { timeInMillis = nextDateMillis; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+
+    val diffMillis = targetDate - today
+    val daysLeft = (diffMillis / (1000 * 60 * 60 * 24)).toInt()
+
+    val (primaryText, secondaryText, textTint, badgeBg) = when {
+        daysLeft < 0 -> listOf(Math.abs(daysLeft).toString(), "Days Ago", Color.Gray, PureBlack)
+        daysLeft == 0 -> listOf("!", "TODAY", SuccessGreen, SuccessGreen.copy(alpha = 0.15f))
+        else -> listOf(daysLeft.toString(), "Days", AccentColor, if (isSelected) DarkGrayCard else PureBlack)
+    }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = if (isSelected) CardOutline else DarkGrayCard),
         shape = RoundedCornerShape(24.dp),
-        border = if (isSelected) BorderStroke(2.dp, AccentColor) else BorderStroke(1.dp, Color(0xFF1E1E1E)),
+        border = if (isSelected) BorderStroke(2.dp, AccentColor) else if (daysLeft == 0) BorderStroke(1.dp, SuccessGreen.copy(alpha = 0.5f)) else BorderStroke(1.dp, Color(0xFF1E1E1E)),
         modifier = modifier.fillMaxWidth()
     ) {
         Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(event.title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary, lineHeight = 28.sp)
                 Spacer(modifier = Modifier.height(6.dp))
-                Text(dateString, fontSize = 13.sp, color = TextSecondary)
+                Text(dateString, fontSize = 13.sp, color = if (daysLeft == 0) SuccessGreen else TextSecondary)
                 Spacer(modifier = Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = if (event.category == "Other") event.customCategory ?: "Other" else event.category,
                         fontSize = 11.sp, color = AccentColor, fontWeight = FontWeight.Bold,
                         modifier = Modifier.background(AccentColor.copy(alpha = 0.15f), RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                     if (event.repeatMode != "None" && event.repeatMode != "Don't repeat") {
-                        Icon(Icons.Default.Refresh, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp).align(Alignment.CenterVertically))
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
                     }
                 }
             }
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center, // <-- FIXED HERE
-                modifier = Modifier.size(70.dp).clip(RoundedCornerShape(16.dp)).background(if (isSelected) DarkGrayCard else PureBlack)
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+                modifier = Modifier.size(70.dp).clip(RoundedCornerShape(16.dp)).background(badgeBg as Color)
             ) {
-                Text(daysLeft, fontSize = 26.sp, fontWeight = FontWeight.Black, color = AccentColor)
-                Text("Days", fontSize = 11.sp, color = TextSecondary, fontWeight = FontWeight.Medium)
+                Text(primaryText as String, fontSize = 26.sp, fontWeight = FontWeight.Black, color = textTint as Color)
+                Text(secondaryText as String, fontSize = 11.sp, color = textTint, fontWeight = FontWeight.Bold)
             }
         }
     }
 }
-
-// --- Detail & Edit Screens Grouped by Cards for Premium Feel ---
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -315,39 +377,29 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
     ) { padding ->
         val currentEvent = event
         if (currentEvent != null) {
+            val actualNextDate = getNextOccurrence(currentEvent)
             val formatter = SimpleDateFormat("EEEE, MMM dd, yyyy \n hh:mm a", Locale.getDefault())
-            val dateString = formatter.format(Date(currentEvent.startDateTimeInMillis))
+            val dateString = formatter.format(Date(actualNextDate))
 
             Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp)) {
                 Text(currentEvent.title, fontSize = 32.sp, lineHeight = 40.sp, fontWeight = FontWeight.Black, color = TextPrimary)
                 Spacer(modifier = Modifier.height(28.dp))
 
-                // Time Card
                 Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(20.dp)) {
-                        DetailRow(Icons.Filled.Schedule, "Date & Time", dateString)
+                        DetailRow(Icons.Filled.Schedule, "Next Occurrence", dateString)
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
                         DetailRow(Icons.Filled.Refresh, "Repeats", currentEvent.repeatMode)
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Info Card
                 Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(20.dp)) {
                         DetailRow(Icons.Filled.Label, "Category", currentEvent.category)
-                        if (!currentEvent.location.isNullOrBlank()) {
-                            HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
-                            DetailRow(Icons.Filled.LocationOn, "Location", currentEvent.location)
-                        }
-                        if (!currentEvent.notes.isNullOrBlank()) {
-                            HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
-                            DetailRow(Icons.Filled.Notes, "Notes", currentEvent.notes)
-                        }
-                        if (!currentEvent.invitees.isNullOrBlank()) {
-                            HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
-                            DetailRow(Icons.Filled.Person, "Invitees", currentEvent.invitees)
-                        }
+                        if (!currentEvent.location.isNullOrBlank()) { HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp)); DetailRow(Icons.Filled.LocationOn, "Location", currentEvent.location) }
+                        if (!currentEvent.notes.isNullOrBlank()) { HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp)); DetailRow(Icons.Filled.Notes, "Notes", currentEvent.notes) }
+                        if (!currentEvent.invitees.isNullOrBlank()) { HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp)); DetailRow(Icons.Filled.Person, "Invitees", currentEvent.invitees) }
                     }
                 }
                 Spacer(modifier = Modifier.height(32.dp))
@@ -359,15 +411,22 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
 @Composable
 fun DetailRow(icon: ImageVector, label: String, value: String) {
     Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
-        Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(12.dp)).padding(10.dp)) {
-            Icon(icon, contentDescription = null, tint = AccentColor, modifier = Modifier.size(20.dp))
-        }
+        Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(12.dp)).padding(10.dp)) { Icon(icon, contentDescription = null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f).padding(top = 2.dp)) {
             Text(label, fontSize = 12.sp, color = TextSecondary, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(4.dp))
             Text(value, fontSize = 16.sp, color = TextPrimary, lineHeight = 24.sp, fontWeight = FontWeight.Normal)
         }
+    }
+}
+
+@Composable
+fun IconRow(icon: ImageVector, content: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+        Icon(icon, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(16.dp))
+        Box(modifier = Modifier.weight(1f)) { content() }
     }
 }
 
@@ -401,9 +460,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                 calendar.timeInMillis = it.startDateTimeInMillis
                 dateText = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(calendar.time)
                 timeText = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(calendar.time)
-                if (it.repeatMode == "Weekly" && it.repeatDays != null) {
-                    selectedDays = it.repeatDays.split(",").mapNotNull { d -> d.toIntOrNull() }.toSet()
-                }
+                if (it.repeatMode == "Weekly" && it.repeatDays != null) { selectedDays = it.repeatDays.split(",").mapNotNull { d -> d.toIntOrNull() }.toSet() }
             }
         }
     }
@@ -419,8 +476,6 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-
-            // Title Input
             OutlinedTextField(
                 value = title, onValueChange = { title = it },
                 placeholder = { Text("Event Title", fontSize = 24.sp, color = TextSecondary, fontWeight = FontWeight.Bold) },
@@ -429,37 +484,25 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                 modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
             )
 
-            // Section 1: Time & Repeat
             Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("WHEN", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 12.dp))
-
+                    Text("WHEN (STARTING DATE)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 12.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Button(
-                            onClick = { DatePickerDialog(context, { _, y, m, d -> calendar.set(y, m, d); dateText = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(calendar.time) }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show() },
-                            modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(12.dp)
-                        ) { Text(dateText, color = TextPrimary) }
-
-                        Button(
-                            onClick = { TimePickerDialog(context, { _, h, m -> calendar.set(Calendar.HOUR_OF_DAY, h); calendar.set(Calendar.MINUTE, m); timeText = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(calendar.time) }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), false).show() },
-                            modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(12.dp)
-                        ) { Text(timeText, color = TextPrimary) }
+                        Button(onClick = { DatePickerDialog(context, { _, y, m, d -> calendar.set(y, m, d); dateText = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(calendar.time) }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(12.dp)) { Text(dateText, color = TextPrimary) }
+                        Button(onClick = { TimePickerDialog(context, { _, h, m -> calendar.set(Calendar.HOUR_OF_DAY, h); calendar.set(Calendar.MINUTE, m); timeText = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(calendar.time) }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), false).show() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(12.dp)) { Text(timeText, color = TextPrimary) }
                     }
                     Spacer(modifier = Modifier.height(16.dp))
-
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(repeatOptions) { option ->
                             val isSelected = selectedRepeat == option
-                            Box(modifier = Modifier.background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(12.dp)).clickable { selectedRepeat = option }.padding(horizontal = 16.dp, vertical = 10.dp))
-                            { Text(option, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp) }
+                            Box(modifier = Modifier.background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(12.dp)).clickable { selectedRepeat = option }.padding(horizontal = 16.dp, vertical = 10.dp)) { Text(option, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp) }
                         }
                     }
                     if (selectedRepeat == "Weekly") {
                         Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                             weekDays.forEachIndexed { i, day ->
                                 val isSelected = selectedDays.contains(i)
-                                Box(modifier = Modifier.size(38.dp).background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(50)).clickable { selectedDays = if (isSelected) selectedDays - i else selectedDays + i }, contentAlignment = Alignment.Center)
-                                { Text(day, color = if (isSelected) Color.Black else TextSecondary, fontWeight = FontWeight.Bold) }
+                                Box(modifier = Modifier.size(38.dp).background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(50)).clickable { selectedDays = if (isSelected) selectedDays - i else selectedDays + i }, contentAlignment = Alignment.Center) { Text(day, color = if (isSelected) Color.Black else TextSecondary, fontWeight = FontWeight.Bold) }
                             }
                         }
                     }
@@ -467,19 +510,15 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
             }
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Section 2: Details
             Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("DETAILS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 12.dp))
-
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 16.dp)) {
                         items(categories) { category ->
                             val isSelected = selectedCategory == category
-                            Box(modifier = Modifier.background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(12.dp)).clickable { selectedCategory = category }.padding(horizontal = 16.dp, vertical = 10.dp))
-                            { Text(category, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp) }
+                            Box(modifier = Modifier.background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(12.dp)).clickable { selectedCategory = category }.padding(horizontal = 16.dp, vertical = 10.dp)) { Text(category, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp) }
                         }
                     }
-
                     OutlinedTextField(value = notes, onValueChange = { notes = it }, placeholder = { Text("Notes", color = TextSecondary) }, leadingIcon = { Icon(Icons.Filled.Notes, null, tint = TextSecondary) }, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, focusedContainerColor = CardOutline, unfocusedContainerColor = CardOutline, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(value = location, onValueChange = { location = it }, placeholder = { Text("Location", color = TextSecondary) }, leadingIcon = { Icon(Icons.Filled.LocationOn, null, tint = TextSecondary) }, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, focusedContainerColor = CardOutline, unfocusedContainerColor = CardOutline, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
@@ -490,11 +529,8 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Action Buttons
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Button(onClick = { navController.popBackStack() }, modifier = Modifier.weight(1f).height(56.dp), colors = ButtonDefaults.buttonColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(16.dp))
-                { Text("Cancel", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Bold) }
-
+                Button(onClick = { navController.popBackStack() }, modifier = Modifier.weight(1f).height(56.dp), colors = ButtonDefaults.buttonColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(16.dp)) { Text("Cancel", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Bold) }
                 Button(
                     onClick = {
                         if (title.isBlank() || dateText == "Select Date" || timeText == "Select Time") { Toast.makeText(context, "Title, Date, and Time are required", Toast.LENGTH_SHORT).show(); return@Button }
