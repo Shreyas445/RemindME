@@ -9,14 +9,15 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface EventDao {
+    // --- Returns the newly generated ID as a Long for the AlarmManager ---
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertEvent(event: Event)
+    suspend fun insertEvent(event: Event): Long
 
-    // NEW: Updates an existing event after editing
+    // Updates an existing event after editing
     @Update
     suspend fun updateEvent(event: Event)
 
-    // NEW: Deletes a list of selected event IDs
+    // Deletes a list of selected event IDs
     @Query("DELETE FROM events WHERE id IN (:idList)")
     suspend fun deleteEvents(idList: List<Int>)
 

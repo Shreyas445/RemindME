@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -34,6 +40,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".AlarmActivity"
+            android:exported="true"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true" />
+
         <receiver
             android:name=".widget.CountdownWidgetReceiver"
             android:exported="true">
@@ -44,6 +56,7 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/countdown_widget_info" />
         </receiver>
+        <receiver android:name=".AlarmReceiver" android:exported="true" />
     </application>
 
 </manifest>
