@@ -8,19 +8,21 @@ data class Event(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val title: String,
     val category: String,
+    val customCategory: String? = null,
     val startDateTimeInMillis: Long,
-    val repeatMode: String,
-    val repeatDays: String? = null,
+    val repeatMode: String, // "None", "Daily", "Weekly", "Monthly", "Yearly"
+    val repeatDays: String? = null, // Stored as comma-separated days for weekly
     val notes: String? = null,
     val location: String? = null,
     val invitees: String? = null,
-    val customCategory: String? = null,
 
+    // --- ALARM SETTINGS ---
     val isVibrationEnabled: Boolean = true,
     val ringtoneUri: String? = null,
     val isLooping: Boolean = false,
-    val loopCount: Int = 2,
+    val loopCount: Int = 1,
+    val volumeLevel: Float = 1.0f,
 
-    // --- NEW: Volume Memory (0.0f to 2.0f) ---
-    val volumeLevel: Float = 1.0f
+    // --- NEW: PRE-ALERT FEATURE ---
+    val alertBefore: String = "None" // "None", "30 mins", "1 hour", "1 day"
 )

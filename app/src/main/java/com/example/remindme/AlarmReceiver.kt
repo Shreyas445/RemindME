@@ -35,9 +35,6 @@ class AlarmReceiver : BroadcastReceiver() {
                 if (wakeLock?.isHeld == true) wakeLock?.release()
                 wakeLock = null
             } catch (e: Exception) {}
-
-            // FIX: We NO LONGER cancel the notification here!
-            // It will stay in the tray until the user swipes it away.
         }
     }
 
@@ -45,9 +42,62 @@ class AlarmReceiver : BroadcastReceiver() {
         val eventId = intent.getIntExtra("EVENT_ID", -1)
         val title = intent.getStringExtra("EVENT_TITLE") ?: "Event Reminder"
         val category = intent.getStringExtra("EVENT_CATEGORY") ?: "Event"
+        val isPreAlert = intent.getBooleanExtra("IS_PRE_ALERT", false)
+        val alertBeforeStr = intent.getStringExtra("ALERT_BEFORE_STR") ?: ""
+
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "remindme_alarms_v5"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(channelId, "Event Alarms", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "High priority alarms and alerts"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // ==========================================
+        // 🧠 THE INTELLIGENT PRE-ALERT LOGIC
+        // ==========================================
+        if (isPreAlert) {
+            val smartTitle = when (alertBeforeStr) {
+                "1 day" -> "Tomorrow"
+                "1 hour" -> "In 1 Hour"
+                "30 mins" -> "In 30 Minutes"
+                else -> "Upcoming"
+            }
+
+            val smartText = when (category) {
+                "Birthdays" -> if (alertBeforeStr == "1 day") "Don't forget, tomorrow is $title's Birthday! 🎂" else "$title's Birthday is coming up! 🎉"
+                "Medicine" -> "Time for your medicine: $title 💊"
+                "Exams" -> "Good luck studying! Your $title exam is $smartTitle 📚"
+                "Last Dates" -> "Deadline Alert: $title is due $smartTitle ⚠️"
+                else -> "$title is $smartTitle"
+            }
+
+            // Create a standard, quiet tap-to-open notification
+            val openAppIntent = Intent(context, MainActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(context, eventId + 500000, openAppIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_popup_reminder)
+                .setColor(android.graphics.Color.parseColor("#FFC107"))
+                .setContentTitle(smartTitle)
+                .setContentText(smartText)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            // We use a different ID so it doesn't overwrite the main alarm notification later!
+            notificationManager.notify(eventId + 500000, notification)
+            return // <--- STOP HERE. Do not play the loud alarm music!
+        }
+
+        // ==========================================
+        // 🚨 THE MAIN WAKE-UP ALARM LOGIC
+        // ==========================================
         val vibrationEnabled = intent.getBooleanExtra("EVENT_VIBRATION", true)
         val ringtoneUriString = intent.getStringExtra("EVENT_RINGTONE")
-
         val isLooping = intent.getBooleanExtra("EVENT_IS_LOOPING", false)
         val loopCount = intent.getIntExtra("EVENT_LOOP_COUNT", 1)
         val volumeLevel = intent.getFloatExtra("EVENT_VOLUME", 1.0f)
@@ -57,19 +107,6 @@ class AlarmReceiver : BroadcastReceiver() {
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RemindMe::AlarmAudioWakeLock")
         wakeLock?.acquire(3 * 60 * 1000L)
-
-        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channelId = "remindme_silent_alarm_v4_$vibrationEnabled"
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Event Alarms", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "High priority alarms for events"
-                setSound(null, null)
-                enableVibration(vibrationEnabled)
-                if (vibrationEnabled) vibrationPattern = longArrayOf(0, 500, 500, 500)
-            }
-            notificationManager.createNotificationChannel(channel)
-        }
 
         val openAlarmIntent = Intent(context, AlarmActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -91,20 +128,13 @@ class AlarmReceiver : BroadcastReceiver() {
             .setFullScreenIntent(pendingIntent, true)
             .build()
 
-        // This pushes the notification to the tray where it will stay!
         notificationManager.notify(eventId, notification)
 
         if (ringtoneUriString != "NONE" && !ringtoneUriString.isNullOrBlank()) {
             try {
                 val uri = Uri.parse(ringtoneUriString)
-
                 mediaPlayer = MediaPlayer().apply {
-                    setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .setUsage(AudioAttributes.USAGE_ALARM)
-                            .build()
-                    )
+                    setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).setUsage(AudioAttributes.USAGE_ALARM).build())
                     setDataSource(context, uri)
                     prepare()
                 }
@@ -125,27 +155,17 @@ class AlarmReceiver : BroadcastReceiver() {
                     mediaPlayer?.setOnCompletionListener { player ->
                         playsCompleted++
                         if (playsCompleted < loopCount) {
-                            player.seekTo(0)
-                            player.start()
-                        } else {
-                            stopAlarmAudio(context, eventId)
-                        }
+                            player.seekTo(0); player.start()
+                        } else { stopAlarmAudio(context, eventId) }
                     }
                 } else {
-                    mediaPlayer?.setOnCompletionListener {
-                        stopAlarmAudio(context, eventId)
-                    }
+                    mediaPlayer?.setOnCompletionListener { stopAlarmAudio(context, eventId) }
                 }
 
-                mediaPlayer?.setOnErrorListener { _, _, _ ->
-                    stopAlarmAudio(context, eventId)
-                    true
-                }
-
+                mediaPlayer?.setOnErrorListener { _, _, _ -> stopAlarmAudio(context, eventId); true }
                 mediaPlayer?.start()
             } catch (e: Exception) {
                 stopAlarmAudio(context, eventId)
-                e.printStackTrace()
             }
         } else {
             if (wakeLock?.isHeld == true) wakeLock?.release()

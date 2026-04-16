@@ -27,11 +27,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.CalendarToday
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -46,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
@@ -72,50 +74,80 @@ val TextPrimary = Color(0xFFF5F5F5)
 val TextSecondary = Color(0xFFA0A0A0)
 val SuccessGreen = Color(0xFF4CAF50)
 
-// --- Helper: Schedule the OS Alarm ---
+// --- Helper: Schedule the OS Alarm (Now handles Pre-Alerts!) ---
 fun scheduleEventAlarm(context: Context, event: Event) {
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, AlarmReceiver::class.java).apply {
-        putExtra("EVENT_ID", event.id)
-        putExtra("EVENT_TITLE", event.title)
-        putExtra("EVENT_CATEGORY", event.category)
-        putExtra("EVENT_VIBRATION", event.isVibrationEnabled)
-        putExtra("EVENT_RINGTONE", event.ringtoneUri)
-        putExtra("EVENT_IS_LOOPING", event.isLooping)
-        putExtra("EVENT_LOOP_COUNT", event.loopCount)
-        putExtra("EVENT_VOLUME", event.volumeLevel)
-    }
-
-    val pendingIntent = PendingIntent.getBroadcast(
-        context, event.id, intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-
     val triggerTime = getNextOccurrence(event)
 
     if (triggerTime > System.currentTimeMillis()) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (alarmManager.canScheduleExactAlarms()) {
-                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-                } else {
-                    alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-                }
-            } else {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
+            // 1. SCHEDULE THE MAIN ALARM
+            val mainIntent = Intent(context, AlarmReceiver::class.java).apply {
+                putExtra("EVENT_ID", event.id)
+                putExtra("EVENT_TITLE", event.title)
+                putExtra("EVENT_CATEGORY", event.category)
+                putExtra("EVENT_VIBRATION", event.isVibrationEnabled)
+                putExtra("EVENT_RINGTONE", event.ringtoneUri)
+                putExtra("EVENT_IS_LOOPING", event.isLooping)
+                putExtra("EVENT_LOOP_COUNT", event.loopCount)
+                putExtra("EVENT_VOLUME", event.volumeLevel)
+                putExtra("IS_PRE_ALERT", false)
             }
+            val mainPendingIntent = PendingIntent.getBroadcast(context, event.id, mainIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (alarmManager.canScheduleExactAlarms()) alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, mainPendingIntent)
+                else alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, mainPendingIntent)
+            } else {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, mainPendingIntent)
+            }
+
+            // 2. SCHEDULE THE PRE-ALERT (If selected)
+            if (event.alertBefore != "None") {
+                val preAlertOffsetMillis = when (event.alertBefore) {
+                    "30 mins" -> 30L * 60L * 1000L
+                    "1 hour" -> 60L * 60L * 1000L
+                    "1 day" -> 24L * 60L * 60L * 1000L
+                    else -> 0L
+                }
+
+                val preTriggerTime = triggerTime - preAlertOffsetMillis
+
+                // Only schedule if the pre-alert time hasn't already passed!
+                if (preTriggerTime > System.currentTimeMillis()) {
+                    val preIntent = Intent(context, AlarmReceiver::class.java).apply {
+                        putExtra("EVENT_ID", event.id)
+                        putExtra("EVENT_TITLE", event.title)
+                        putExtra("EVENT_CATEGORY", event.category)
+                        putExtra("IS_PRE_ALERT", true)
+                        putExtra("ALERT_BEFORE_STR", event.alertBefore)
+                    }
+                    // ID is offset by 500,000 so it doesn't overwrite the main alarm
+                    val prePendingIntent = PendingIntent.getBroadcast(context, event.id + 500000, preIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (alarmManager.canScheduleExactAlarms()) alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preTriggerTime, prePendingIntent)
+                        else alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preTriggerTime, prePendingIntent)
+                    } else {
+                        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preTriggerTime, prePendingIntent)
+                    }
+                }
+            }
+
         } catch (e: SecurityException) { e.printStackTrace() }
     }
 }
 
 fun cancelEventAlarm(context: Context, eventId: Int) {
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, AlarmReceiver::class.java)
-    val pendingIntent = PendingIntent.getBroadcast(
-        context, eventId, intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    alarmManager.cancel(pendingIntent)
+    // Cancel Main
+    val mainIntent = Intent(context, AlarmReceiver::class.java)
+    val mainPendingIntent = PendingIntent.getBroadcast(context, eventId, mainIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    alarmManager.cancel(mainPendingIntent)
+    // Cancel Pre-Alert
+    val preIntent = Intent(context, AlarmReceiver::class.java)
+    val prePendingIntent = PendingIntent.getBroadcast(context, eventId + 500000, preIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    alarmManager.cancel(prePendingIntent)
 }
 
 fun getNextOccurrence(event: Event): Long {
@@ -237,15 +269,11 @@ class MainActivity : ComponentActivity() {
                             confirmButton = {
                                 TextButton(onClick = {
                                     showExactAlarmDialog = false
-                                    val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                                        data = Uri.parse("package:${context.packageName}")
-                                    }
+                                    val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply { data = Uri.parse("package:${context.packageName}") }
                                     context.startActivity(intent)
                                 }) { Text("Go to Settings", color = AccentColor, fontWeight = FontWeight.Bold) }
                             },
-                            dismissButton = {
-                                TextButton(onClick = { showExactAlarmDialog = false }) { Text("Later", color = TextSecondary) }
-                            }
+                            dismissButton = { TextButton(onClick = { showExactAlarmDialog = false }) { Text("Later", color = TextSecondary) } }
                         )
                     }
                 }
@@ -281,67 +309,35 @@ fun SettingsScreen(navController: NavController) {
             TopAppBar(
                 title = { Text("Settings", color = TextPrimary, fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = PureBlack),
-                navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary)
-                    }
-                }
+                navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } }
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-        ) {
+        Column(modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
             Text("SUPPORT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 8.dp, start = 8.dp))
-
             Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                 Column {
                     SettingsClickableRow(icon = Icons.Filled.StarRate, label = "Rate the App") {
                         val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${context.packageName}"))
-                        try {
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${context.packageName}")))
-                        }
+                        try { context.startActivity(intent) } catch (e: Exception) { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${context.packageName}"))) }
                     }
                     HorizontalDivider(color = CardOutline)
-
                     SettingsClickableRow(icon = Icons.Filled.Share, label = "Share with Friends") {
-                        val sendIntent = Intent().apply {
-                            action = Intent.ACTION_SEND
-                            putExtra(Intent.EXTRA_TEXT, "Check out Remind Me, an awesome alarm and reminder app! https://play.google.com/store/apps/details?id=${context.packageName}")
-                            type = "text/plain"
-                        }
+                        val sendIntent = Intent().apply { action = Intent.ACTION_SEND; putExtra(Intent.EXTRA_TEXT, "Check out Remind Me, an awesome alarm and reminder app! https://play.google.com/store/apps/details?id=${context.packageName}"); type = "text/plain" }
                         context.startActivity(Intent.createChooser(sendIntent, "Share App"))
                     }
                     HorizontalDivider(color = CardOutline)
-
                     SettingsClickableRow(icon = Icons.Filled.Email, label = "Contact Developer") {
-                        val intent = Intent(Intent.ACTION_SENDTO).apply {
-                            data = Uri.parse("mailto:your_email@example.com")
-                            putExtra(Intent.EXTRA_SUBJECT, "Remind Me App Feedback")
-                        }
-                        try {
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "No email app found.", Toast.LENGTH_SHORT).show()
-                        }
+                        val intent = Intent(Intent.ACTION_SENDTO).apply { data = Uri.parse("mailto:your_email@example.com"); putExtra(Intent.EXTRA_SUBJECT, "Remind Me App Feedback") }
+                        try { context.startActivity(intent) } catch (e: Exception) { Toast.makeText(context, "No email app found.", Toast.LENGTH_SHORT).show() }
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(24.dp))
-
             Text("ABOUT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 8.dp, start = 8.dp))
-
             Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
-                Column {
-                    SettingsRow(icon = Icons.Filled.Info, label = "App Version", value = appVersion)
-                }
+                Column { SettingsRow(icon = Icons.Filled.Info, label = "App Version", value = appVersion) }
             }
         }
     }
@@ -511,10 +507,14 @@ fun HomeScreen(navController: NavController, dao: EventDao) {
     }
 }
 
+// --- NEW POLISHED EVENT CARD ---
 @Composable
 fun EventCard(event: Event, nextDateMillis: Long, isSelected: Boolean, modifier: Modifier = Modifier) {
-    val formatter = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
-    val dateString = formatter.format(Date(nextDateMillis))
+    val formatterDate = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
+    val formatterTime = SimpleDateFormat("hh:mm a", Locale.getDefault())
+
+    val dateString = formatterDate.format(Date(nextDateMillis))
+    val timeString = formatterTime.format(Date(nextDateMillis))
 
     val today = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
     val targetDate = Calendar.getInstance().apply { timeInMillis = nextDateMillis; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
@@ -522,33 +522,64 @@ fun EventCard(event: Event, nextDateMillis: Long, isSelected: Boolean, modifier:
     val diffMillis = targetDate - today
     val daysLeft = (diffMillis / (1000 * 60 * 60 * 24)).toInt()
 
-    val (primaryText, secondaryText, textTint, badgeBg) = when {
-        daysLeft < 0 -> listOf(Math.abs(daysLeft).toString(), "Days Ago", Color.Gray, PureBlack)
-        daysLeft == 0 -> listOf("!", "TODAY", SuccessGreen, SuccessGreen.copy(alpha = 0.15f))
-        else -> listOf(daysLeft.toString(), "Days", AccentColor, if (isSelected) DarkGrayCard else PureBlack)
+    val (badgeText, badgeBg, badgeTint) = when {
+        daysLeft < 0 -> Triple(Math.abs(daysLeft).toString() + "d ago", CardOutline, TextSecondary)
+        daysLeft == 0 -> Triple("TODAY", SuccessGreen.copy(alpha = 0.2f), SuccessGreen)
+        daysLeft == 1 -> Triple("TMRW", AccentColor.copy(alpha = 0.2f), AccentColor)
+        else -> Triple("In ${daysLeft}d", DarkGrayCard, AccentColor)
+    }
+
+    val categoryIcon = when (event.category) {
+        "Birthdays" -> Icons.Outlined.Cake
+        "Exams", "Medicine", "Last Dates" -> Icons.Outlined.Assignment
+        "Events" -> Icons.Outlined.Event
+        else -> Icons.Outlined.Label
     }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = if (isSelected) CardOutline else DarkGrayCard),
         shape = RoundedCornerShape(24.dp),
-        border = if (isSelected) BorderStroke(2.dp, AccentColor) else if (daysLeft == 0) BorderStroke(1.dp, SuccessGreen.copy(alpha = 0.5f)) else BorderStroke(1.dp, Color(0xFF1E1E1E)),
+        border = if (isSelected) BorderStroke(2.dp, AccentColor) else BorderStroke(1.dp, Color(0xFF1E1E1E)),
         modifier = modifier.fillMaxWidth()
     ) {
-        Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(event.title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary, lineHeight = 28.sp)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(dateString, fontSize = 13.sp, color = if (daysLeft == 0) SuccessGreen else TextSecondary)
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = if (event.category == "Other") event.customCategory ?: "Other" else event.category, fontSize = 11.sp, color = AccentColor, fontWeight = FontWeight.Bold, modifier = Modifier.background(AccentColor.copy(alpha = 0.15f), RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp))
-                    if (event.repeatMode != "None" && event.repeatMode != "Don't repeat") { Icon(Icons.Default.Refresh, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp)) }
-                    if (event.isVibrationEnabled || event.ringtoneUri != "NONE") { Icon(Icons.Default.Notifications, contentDescription = null, tint = AccentColor.copy(alpha = 0.6f), modifier = Modifier.size(16.dp)) }
+        Column(modifier = Modifier.padding(20.dp)) {
+            // Top Row: Category Icon + Title + Countdown Badge
+            Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
+                Box(modifier = Modifier.size(44.dp).background(CardOutline, CircleShape), contentAlignment = Alignment.Center) {
+                    Icon(categoryIcon, contentDescription = null, tint = AccentColor, modifier = Modifier.size(22.dp))
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(event.title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary, lineHeight = 26.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (event.notes?.isNotBlank() == true) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(event.notes!!, fontSize = 13.sp, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Box(modifier = Modifier.background(badgeBg, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    Text(badgeText, fontSize = 12.sp, fontWeight = FontWeight.Black, color = badgeTint)
                 }
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.size(70.dp).clip(RoundedCornerShape(16.dp)).background(badgeBg as Color)) {
-                Text(primaryText as String, fontSize = 26.sp, fontWeight = FontWeight.Black, color = textTint as Color)
-                Text(secondaryText as String, fontSize = 11.sp, color = textTint, fontWeight = FontWeight.Bold)
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Bottom Row: Date/Time + Indicators
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                // Sleek Date & Time display
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Schedule, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(dateString, fontSize = 14.sp, color = TextSecondary, fontWeight = FontWeight.Medium)
+                    Text(" • ", fontSize = 14.sp, color = TextSecondary)
+                    Text(timeString, fontSize = 14.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
+                }
+
+                // Alert / Repeat Indicators
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (event.alertBefore != "None") { Icon(Icons.Outlined.NotificationsActive, contentDescription = "Pre-Alert On", tint = AccentColor, modifier = Modifier.size(18.dp)) }
+                    if (event.repeatMode != "None" && event.repeatMode != "Don't repeat") { Icon(Icons.Outlined.Loop, contentDescription = "Repeats", tint = TextSecondary, modifier = Modifier.size(18.dp)) }
+                }
             }
         }
     }
@@ -563,9 +594,7 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
 
     Scaffold(
         containerColor = PureBlack,
-        topBar = {
-            TopAppBar(title = { }, colors = TopAppBarDefaults.topAppBarColors(containerColor = PureBlack), navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } }, actions = { IconButton(onClick = { navController.navigate("add_edit/${eventId}") }) { Icon(Icons.Filled.Edit, "Edit", tint = AccentColor) } })
-        }
+        topBar = { TopAppBar(title = { }, colors = TopAppBarDefaults.topAppBarColors(containerColor = PureBlack), navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } }, actions = { IconButton(onClick = { navController.navigate("add_edit/${eventId}") }) { Icon(Icons.Filled.Edit, "Edit", tint = AccentColor) } }) }
     ) { padding ->
         val currentEvent = event
         if (currentEvent != null) {
@@ -582,6 +611,10 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
                         DetailRow(Icons.Filled.Schedule, "Next Occurrence", dateString)
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
                         DetailRow(Icons.Filled.Refresh, "Repeats", currentEvent.repeatMode)
+                        if (currentEvent.alertBefore != "None") {
+                            HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
+                            DetailRow(Icons.Filled.NotificationsActive, "Alert Before", currentEvent.alertBefore)
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -589,15 +622,9 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
                 Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(20.dp)) {
                         DetailRow(Icons.Filled.Notifications, "Alarm Sound", getRingtoneName(context, currentEvent.ringtoneUri))
-
-                        if (currentEvent.isLooping) {
-                            HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
-                            DetailRow(Icons.Filled.Repeat, "Loops", "${currentEvent.loopCount} Times")
-                        }
-
+                        if (currentEvent.isLooping) { HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp)); DetailRow(Icons.Filled.Repeat, "Loops", "${currentEvent.loopCount} Times") }
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
                         DetailRow(Icons.Filled.VolumeUp, "Volume Level", "${(currentEvent.volumeLevel * 100).toInt()}%")
-
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
                         DetailRow(Icons.Filled.Vibration, "Vibration", if (currentEvent.isVibrationEnabled) "Enabled" else "Disabled")
                     }
@@ -618,7 +645,6 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
     }
 }
 
-// --- MISSING FUNCTION RESTORED HERE ---
 @Composable
 fun DetailRow(icon: ImageVector, label: String, value: String) {
     Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
@@ -649,6 +675,11 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
 
     val repeatOptions = listOf("Don't repeat", "Daily", "Weekly", "Monthly", "Yearly")
     var selectedRepeat by remember { mutableStateOf(repeatOptions[0]) }
+
+    // --- NEW PRE-ALERT OPTIONS ---
+    val alertBeforeOptions = listOf("None", "30 mins", "1 hour", "1 day")
+    var selectedAlertBefore by remember { mutableStateOf(alertBeforeOptions[0]) }
+
     val weekDays = listOf("S", "M", "T", "W", "T", "F", "S")
     var selectedDays by remember { mutableStateOf(setOf<Int>()) }
     val calendar = remember { Calendar.getInstance() }
@@ -666,18 +697,10 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
     var loudnessEnhancer by remember { mutableStateOf<LoudnessEnhancer?>(null) }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            loudnessEnhancer?.release()
-            mediaPlayer?.release()
-        }
-    }
+    DisposableEffect(Unit) { onDispose { loudnessEnhancer?.release(); mediaPlayer?.release() } }
 
     val ringtoneLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val uri: Uri? = result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
-            ringtoneUri = uri?.toString()
-        }
+        if (result.resultCode == Activity.RESULT_OK) ringtoneUri = result.data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)?.toString()
     }
 
     LaunchedEffect(eventId) {
@@ -687,10 +710,8 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                 title = it.title; selectedCategory = it.category; selectedRepeat = it.repeatMode
                 notes = it.notes ?: ""; location = it.location ?: ""; invitees = it.invitees ?: ""
                 isVibrationEnabled = it.isVibrationEnabled; ringtoneUri = it.ringtoneUri
-
-                isLooping = it.isLooping; loopCount = it.loopCount
-                volumeLevel = it.volumeLevel
-
+                isLooping = it.isLooping; loopCount = it.loopCount; volumeLevel = it.volumeLevel
+                selectedAlertBefore = it.alertBefore // LOAD PRE-ALERT
                 customCategoryText = it.customCategory ?: ""
                 calendar.timeInMillis = it.startDateTimeInMillis
                 dateText = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(calendar.time)
@@ -709,8 +730,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
 
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
                 OutlinedTextField(
-                    value = title, onValueChange = { title = it },
-                    placeholder = { Text("Event Title", fontSize = 24.sp, color = TextSecondary, fontWeight = FontWeight.Bold) },
+                    value = title, onValueChange = { title = it }, placeholder = { Text("Event Title", fontSize = 24.sp, color = TextSecondary, fontWeight = FontWeight.Bold) },
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary, cursorColor = AccentColor),
                     textStyle = LocalTextStyle.current.copy(fontSize = 28.sp, fontWeight = FontWeight.Bold), modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
                 )
@@ -722,7 +742,21 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                             Button(onClick = { DatePickerDialog(context, { _, y, m, d -> calendar.set(y, m, d); dateText = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(calendar.time) }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(12.dp)) { Text(dateText, color = TextPrimary) }
                             Button(onClick = { TimePickerDialog(context, { _, h, m -> calendar.set(Calendar.HOUR_OF_DAY, h); calendar.set(Calendar.MINUTE, m); timeText = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(calendar.time) }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), false).show() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(12.dp)) { Text(timeText, color = TextPrimary) }
                         }
-                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // NEW PRE-ALERT TOGGLES IN UI
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text("ADVANCE ALERT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 12.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(alertBeforeOptions) { option ->
+                                val isSelected = selectedAlertBefore == option
+                                Box(modifier = Modifier.background(if (isSelected) AccentColor else CardOutline, RoundedCornerShape(12.dp)).clickable { selectedAlertBefore = option }.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                                    Text(option, color = if (isSelected) Color.Black else TextSecondary, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text("REPEATS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 12.dp))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(repeatOptions) { option ->
                                 val isSelected = selectedRepeat == option
@@ -745,70 +779,34 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("ALERTS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 12.dp))
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { showRingtoneSheet = true }.padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Notifications, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
-                                Spacer(Modifier.width(16.dp))
-                                Text("Ringtone", fontSize = 16.sp, color = TextPrimary)
-                            }
+                        Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { showRingtoneSheet = true }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Row(verticalAlignment = Alignment.CenterVertically) { Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Notifications, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }; Spacer(Modifier.width(16.dp)); Text("Ringtone", fontSize = 16.sp, color = TextPrimary) }
                             Text(getRingtoneName(context, ringtoneUri), fontSize = 14.sp, color = TextSecondary, modifier = Modifier.weight(1f), textAlign = TextAlign.End)
                         }
 
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 8.dp))
 
-                        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.VolumeUp, null, tint = AccentColor, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(16.dp))
-                            Text("Volume: ${(volumeLevel * 100).toInt()}%", fontSize = 16.sp, color = TextPrimary)
-                        }
-                        Slider(
-                            value = volumeLevel,
-                            onValueChange = { volumeLevel = it },
-                            valueRange = 0f..2f,
-                            colors = SliderDefaults.colors(thumbColor = AccentColor, activeTrackColor = AccentColor, inactiveTrackColor = CardOutline)
-                        )
+                        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Filled.VolumeUp, null, tint = AccentColor, modifier = Modifier.size(20.dp)); Spacer(Modifier.width(16.dp)); Text("Volume: ${(volumeLevel * 100).toInt()}%", fontSize = 16.sp, color = TextPrimary) }
+                        Slider(value = volumeLevel, onValueChange = { volumeLevel = it }, valueRange = 0f..2f, colors = SliderDefaults.colors(thumbColor = AccentColor, activeTrackColor = AccentColor, inactiveTrackColor = CardOutline))
 
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 8.dp))
 
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Vibration, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
-                                Spacer(Modifier.width(16.dp))
-                                Text("Vibration", fontSize = 16.sp, color = TextPrimary)
-                            }
-                            Switch(
-                                checked = isVibrationEnabled, onCheckedChange = { isVibrationEnabled = it },
-                                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AccentColor, uncheckedThumbColor = TextSecondary, uncheckedTrackColor = CardOutline)
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) { Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Vibration, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }; Spacer(Modifier.width(16.dp)); Text("Vibration", fontSize = 16.sp, color = TextPrimary) }
+                            Switch(checked = isVibrationEnabled, onCheckedChange = { isVibrationEnabled = it }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AccentColor, uncheckedThumbColor = TextSecondary, uncheckedTrackColor = CardOutline))
                         }
 
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 8.dp))
 
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Repeat, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
-                                Spacer(Modifier.width(16.dp))
-                                Text("Loop Ringtone", fontSize = 16.sp, color = TextPrimary)
-                            }
-                            Switch(
-                                checked = isLooping, onCheckedChange = { isLooping = it },
-                                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AccentColor, uncheckedThumbColor = TextSecondary, uncheckedTrackColor = CardOutline)
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) { Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Repeat, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }; Spacer(Modifier.width(16.dp)); Text("Loop Ringtone", fontSize = 16.sp, color = TextPrimary) }
+                            Switch(checked = isLooping, onCheckedChange = { isLooping = it }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AccentColor, uncheckedThumbColor = TextSecondary, uncheckedTrackColor = CardOutline))
                         }
 
                         AnimatedVisibility(visible = isLooping) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("Loop Count", fontSize = 14.sp, color = TextSecondary, modifier = Modifier.padding(start = 44.dp))
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.background(CardOutline, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.background(CardOutline, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 4.dp)) {
                                     IconButton(onClick = { if (loopCount > 1) loopCount-- }, modifier = Modifier.size(32.dp)) { Icon(Icons.Filled.Remove, "Decrease", tint = TextPrimary, modifier = Modifier.size(18.dp)) }
                                     Text("$loopCount", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp))
                                     IconButton(onClick = { if (loopCount < 20) loopCount++ }, modifier = Modifier.size(32.dp)) { Icon(Icons.Filled.Add, "Increase", tint = TextPrimary, modifier = Modifier.size(18.dp)) }
@@ -829,14 +827,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                             }
                         }
 
-                        AnimatedVisibility(visible = selectedCategory == "Other") {
-                            OutlinedTextField(
-                                value = customCategoryText, onValueChange = { customCategoryText = it },
-                                placeholder = { Text("Custom category name (optional)", color = TextSecondary) }, leadingIcon = { Icon(Icons.Filled.Label, null, tint = TextSecondary) },
-                                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AccentColor, unfocusedBorderColor = Color.Transparent, focusedContainerColor = CardOutline, unfocusedContainerColor = CardOutline, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary),
-                                shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
-                            )
-                        }
+                        AnimatedVisibility(visible = selectedCategory == "Other") { OutlinedTextField(value = customCategoryText, onValueChange = { customCategoryText = it }, placeholder = { Text("Custom category name (optional)", color = TextSecondary) }, leadingIcon = { Icon(Icons.Filled.Label, null, tint = TextSecondary) }, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AccentColor, unfocusedBorderColor = Color.Transparent, focusedContainerColor = CardOutline, unfocusedContainerColor = CardOutline, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) }
 
                         OutlinedTextField(value = notes, onValueChange = { notes = it }, placeholder = { Text("Notes", color = TextSecondary) }, leadingIcon = { Icon(Icons.Filled.Notes, null, tint = TextSecondary) }, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, focusedContainerColor = CardOutline, unfocusedContainerColor = CardOutline, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
                         Spacer(modifier = Modifier.height(12.dp))
@@ -851,10 +842,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
             Surface(color = DarkGrayCard, shadowElevation = 16.dp) {
                 Column {
                     HorizontalDivider(color = CardOutline)
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 20.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Button(onClick = { navController.popBackStack() }, modifier = Modifier.weight(1f).height(56.dp), colors = ButtonDefaults.buttonColors(containerColor = CardOutline), shape = RoundedCornerShape(16.dp)) { Text("Cancel", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Bold) }
                         Button(
                             onClick = {
@@ -864,7 +852,8 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                                         id = if (isEditMode) eventId else 0, title = title, category = selectedCategory, startDateTimeInMillis = calendar.timeInMillis, repeatMode = selectedRepeat,
                                         repeatDays = if (selectedRepeat == "Weekly") selectedDays.joinToString(",") else null, notes = notes.takeIf { it.isNotBlank() }, location = location.takeIf { it.isNotBlank() }, invitees = invitees.takeIf { it.isNotBlank() },
                                         isVibrationEnabled = isVibrationEnabled, ringtoneUri = ringtoneUri, customCategory = if (selectedCategory == "Other") customCategoryText.takeIf { it.isNotBlank() } else null,
-                                        isLooping = isLooping, loopCount = loopCount, volumeLevel = volumeLevel
+                                        isLooping = isLooping, loopCount = loopCount, volumeLevel = volumeLevel,
+                                        alertBefore = selectedAlertBefore // SAVE PRE-ALERT!
                                     )
                                     val finalId = if (isEditMode) { dao.updateEvent(eventToSave); eventToSave.id } else { dao.insertEvent(eventToSave).toInt() }
                                     val finalEventForAlarm = eventToSave.copy(id = finalId)
@@ -881,131 +870,53 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
 
         if (showRingtoneSheet) {
             ModalBottomSheet(
-                onDismissRequest = {
-                    showRingtoneSheet = false
-                    loudnessEnhancer?.release()
-                    mediaPlayer?.let { player ->
-                        if (player.isPlaying) player.stop()
-                        player.release()
-                    }
-                    mediaPlayer = null
-                },
-                containerColor = DarkGrayCard,
-                dragHandle = { BottomSheetDefaults.DragHandle(color = Color.Gray) }
+                onDismissRequest = { showRingtoneSheet = false; loudnessEnhancer?.release(); mediaPlayer?.let { player -> if (player.isPlaying) player.stop(); player.release() }; mediaPlayer = null },
+                containerColor = DarkGrayCard, dragHandle = { BottomSheetDefaults.DragHandle(color = Color.Gray) }
             ) {
-                Column(modifier = Modifier
-                    .padding(horizontal = 24.dp, vertical = 8.dp)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(bottom = 32.dp)
-                ) {
+                Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 32.dp)) {
                     Text("Select Ringtone", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                            ringtoneUri = "NONE"
-                            showRingtoneSheet = false
-                            loudnessEnhancer?.release()
-                            mediaPlayer?.let { if (it.isPlaying) it.stop(); it.release() }
-                            mediaPlayer = null
-                        }.padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { ringtoneUri = "NONE"; showRingtoneSheet = false; loudnessEnhancer?.release(); mediaPlayer?.let { if (it.isPlaying) it.stop(); it.release() }; mediaPlayer = null }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(if (ringtoneUri == "NONE") Icons.Filled.RadioButtonChecked else Icons.Filled.RadioButtonUnchecked, null, tint = if (ringtoneUri == "NONE") AccentColor else TextSecondary)
-                        Spacer(Modifier.width(16.dp))
-                        Text("None (Silent)", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.width(16.dp)); Text("None (Silent)", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                            showRingtoneSheet = false
-                            loudnessEnhancer?.release()
-                            mediaPlayer?.let { if (it.isPlaying) it.stop(); it.release() }
-                            mediaPlayer = null
-                            val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
-                                putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM or RingtoneManager.TYPE_NOTIFICATION)
-                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
-                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
-                                ringtoneUri?.takeIf { it != "NONE" }?.let { putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, Uri.parse(it)) }
-                            }
-                            ringtoneLauncher.launch(intent)
-                        }.padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) {
-                            Icon(Icons.Filled.FolderOpen, null, tint = AccentColor, modifier = Modifier.size(20.dp))
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        Text("Browse System Ringtones", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+                    Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
+                        showRingtoneSheet = false; loudnessEnhancer?.release(); mediaPlayer?.let { if (it.isPlaying) it.stop(); it.release() }; mediaPlayer = null
+                        val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply { putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM or RingtoneManager.TYPE_NOTIFICATION); putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true); putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true); ringtoneUri?.takeIf { it != "NONE" }?.let { putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, Uri.parse(it)) } }
+                        ringtoneLauncher.launch(intent)
+                    }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.FolderOpen, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
+                        Spacer(Modifier.width(16.dp)); Text("Browse System Ringtones", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = CardOutline)
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text("APP TONES", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(8.dp)); HorizontalDivider(color = CardOutline); Spacer(modifier = Modifier.height(16.dp))
+                    Text("APP TONES", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp); Spacer(modifier = Modifier.height(8.dp))
 
                     val appTones = getDeveloperRingtones(context)
-
-                    if (appTones.isEmpty()) {
-                        Text("No custom tones found. Drop MP3s into res/raw folder!", color = TextSecondary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 8.dp))
+                    if (appTones.isEmpty()) { Text("No custom tones found. Drop MP3s into res/raw folder!", color = TextSecondary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 8.dp))
                     } else {
                         appTones.forEach { (toneUri, displayName) ->
                             val isSelected = ringtoneUri == toneUri
-                            Row(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                                    ringtoneUri = toneUri
-
-                                    coroutineScope.launch {
-                                        loudnessEnhancer?.release()
-                                        mediaPlayer?.let { player ->
-                                            if (player.isPlaying) {
-                                                for (i in 10 downTo 0) {
-                                                    try { player.setVolume(i / 10f, i / 10f) } catch(e: Exception){}
-                                                    delay(20)
-                                                }
-                                                try { player.stop() } catch(e: Exception){}
-                                            }
-                                            try { player.release() } catch(e: Exception){}
-                                        }
-
-                                        try {
-                                            val newPlayer = MediaPlayer().apply {
-                                                setAudioAttributes(
-                                                    AudioAttributes.Builder()
-                                                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                                                        .setUsage(AudioAttributes.USAGE_ALARM) // Use Alarm Stream for Preview
-                                                        .build()
-                                                )
-                                                setDataSource(context, Uri.parse(toneUri))
-                                                prepare()
-                                            }
-
-                                            mediaPlayer = newPlayer
-
-                                            if (volumeLevel > 1.0f) {
-                                                newPlayer.setVolume(1.0f, 1.0f)
-                                                loudnessEnhancer = LoudnessEnhancer(newPlayer.audioSessionId).apply {
-                                                    setTargetGain(((volumeLevel - 1.0f) * 2000).toInt())
-                                                    enabled = true
-                                                }
-                                            } else {
-                                                newPlayer.setVolume(volumeLevel, volumeLevel)
-                                            }
-
-                                            newPlayer.start()
-                                        } catch (e: Exception) {
-                                            e.printStackTrace()
-                                        }
+                            Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
+                                ringtoneUri = toneUri
+                                coroutineScope.launch {
+                                    loudnessEnhancer?.release()
+                                    mediaPlayer?.let { player ->
+                                        if (player.isPlaying) { for (i in 10 downTo 0) { try { player.setVolume(i / 10f, i / 10f) } catch(e: Exception){}; delay(20) }; try { player.stop() } catch(e: Exception){} }
+                                        try { player.release() } catch(e: Exception){}
                                     }
-                                }.padding(vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                                    try {
+                                        val newPlayer = MediaPlayer().apply { setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).setUsage(AudioAttributes.USAGE_ALARM).build()); setDataSource(context, Uri.parse(toneUri)); prepare() }
+                                        mediaPlayer = newPlayer
+                                        if (volumeLevel > 1.0f) { newPlayer.setVolume(1.0f, 1.0f); loudnessEnhancer = LoudnessEnhancer(newPlayer.audioSessionId).apply { setTargetGain(((volumeLevel - 1.0f) * 2000).toInt()); enabled = true } } else { newPlayer.setVolume(volumeLevel, volumeLevel) }
+                                        newPlayer.start()
+                                    } catch (e: Exception) { e.printStackTrace() }
+                                }
+                            }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(if (isSelected) Icons.Filled.RadioButtonChecked else Icons.Filled.RadioButtonUnchecked, null, tint = if (isSelected) AccentColor else TextSecondary)
-                                Spacer(Modifier.width(16.dp))
-                                Text(displayName, fontSize = 16.sp, color = TextPrimary)
+                                Spacer(Modifier.width(16.dp)); Text(displayName, fontSize = 16.sp, color = TextPrimary)
                             }
                         }
                     }
