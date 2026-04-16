@@ -8,11 +8,14 @@ import android.app.PendingIntent
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -80,6 +83,7 @@ fun scheduleEventAlarm(context: Context, event: Event) {
         putExtra("EVENT_RINGTONE", event.ringtoneUri)
         putExtra("EVENT_IS_LOOPING", event.isLooping)
         putExtra("EVENT_LOOP_COUNT", event.loopCount)
+        putExtra("EVENT_VOLUME", event.volumeLevel)
     }
 
     val pendingIntent = PendingIntent.getBroadcast(
@@ -100,10 +104,18 @@ fun scheduleEventAlarm(context: Context, event: Event) {
             } else {
                 alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
             }
-        } catch (e: SecurityException) {
-            e.printStackTrace()
-        }
+        } catch (e: SecurityException) { e.printStackTrace() }
     }
+}
+
+fun cancelEventAlarm(context: Context, eventId: Int) {
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val intent = Intent(context, AlarmReceiver::class.java)
+    val pendingIntent = PendingIntent.getBroadcast(
+        context, eventId, intent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    alarmManager.cancel(pendingIntent)
 }
 
 fun getNextOccurrence(event: Event): Long {
@@ -148,7 +160,6 @@ fun getNextOccurrence(event: Event): Long {
     return nextOccurrence.timeInMillis
 }
 
-// --- Dynamic File Scanner ---
 fun getDeveloperRingtones(context: Context): List<Pair<String, String>> {
     val ringtones = mutableListOf<Pair<String, String>>()
     try {
@@ -188,17 +199,55 @@ fun getRingtoneName(context: Context, uriString: String?): String {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        window.statusBarColor = android.graphics.Color.BLACK
+        window.navigationBarColor = android.graphics.Color.BLACK
+
         val db = AppDatabase.getDatabase(this)
 
         setContent {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-                LaunchedEffect(Unit) { permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+            val context = LocalContext.current
+            var showExactAlarmDialog by remember { mutableStateOf(false) }
+
+            val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+            LaunchedEffect(Unit) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                    if (!alarmManager.canScheduleExactAlarms()) {
+                        showExactAlarmDialog = true
+                    }
+                }
             }
 
             MaterialTheme(colorScheme = darkColorScheme(background = PureBlack, surface = DarkGrayCard)) {
                 Surface(modifier = Modifier.fillMaxSize(), color = PureBlack) {
                     RemindMeApp(db.eventDao())
+
+                    if (showExactAlarmDialog) {
+                        AlertDialog(
+                            onDismissRequest = { },
+                            containerColor = DarkGrayCard,
+                            title = { Text("Alarm Permission Required", color = TextPrimary, fontWeight = FontWeight.Bold) },
+                            text = { Text("To ensure your alarms wake up the screen and ring exactly on time, Android requires you to manually grant 'Alarms & Reminders' permission. Please enable it in the next screen.", color = TextSecondary, lineHeight = 20.sp) },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showExactAlarmDialog = false
+                                    val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    context.startActivity(intent)
+                                }) { Text("Go to Settings", color = AccentColor, fontWeight = FontWeight.Bold) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showExactAlarmDialog = false }) { Text("Later", color = TextSecondary) }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -216,7 +265,109 @@ fun RemindMeApp(dao: EventDao) {
         composable("add_edit/{eventId}", arguments = listOf(navArgument("eventId") { type = NavType.IntType })) { backStackEntry ->
             AddEditEventScreen(navController, dao, backStackEntry.arguments?.getInt("eventId") ?: -1)
         }
-        composable("settings") { Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Settings coming soon", color = TextSecondary) } }
+        composable("settings") { SettingsScreen(navController) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(navController: NavController) {
+    val context = LocalContext.current
+    val appVersion = "1.0.0"
+
+    Scaffold(
+        containerColor = PureBlack,
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings", color = TextPrimary, fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = PureBlack),
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary)
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text("SUPPORT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 8.dp, start = 8.dp))
+
+            Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Column {
+                    SettingsClickableRow(icon = Icons.Filled.StarRate, label = "Rate the App") {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${context.packageName}"))
+                        try {
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${context.packageName}")))
+                        }
+                    }
+                    HorizontalDivider(color = CardOutline)
+
+                    SettingsClickableRow(icon = Icons.Filled.Share, label = "Share with Friends") {
+                        val sendIntent = Intent().apply {
+                            action = Intent.ACTION_SEND
+                            putExtra(Intent.EXTRA_TEXT, "Check out Remind Me, an awesome alarm and reminder app! https://play.google.com/store/apps/details?id=${context.packageName}")
+                            type = "text/plain"
+                        }
+                        context.startActivity(Intent.createChooser(sendIntent, "Share App"))
+                    }
+                    HorizontalDivider(color = CardOutline)
+
+                    SettingsClickableRow(icon = Icons.Filled.Email, label = "Contact Developer") {
+                        val intent = Intent(Intent.ACTION_SENDTO).apply {
+                            data = Uri.parse("mailto:your_email@example.com")
+                            putExtra(Intent.EXTRA_SUBJECT, "Remind Me App Feedback")
+                        }
+                        try {
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "No email app found.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text("ABOUT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp, modifier = Modifier.padding(bottom = 8.dp, start = 8.dp))
+
+            Card(colors = CardDefaults.cardColors(containerColor = DarkGrayCard), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Column {
+                    SettingsRow(icon = Icons.Filled.Info, label = "App Version", value = appVersion)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SettingsRow(icon: ImageVector, label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(icon, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
+            Spacer(Modifier.width(16.dp))
+            Text(label, fontSize = 16.sp, color = TextPrimary)
+        }
+        Text(value, fontSize = 14.sp, color = TextSecondary)
+    }
+}
+
+@Composable
+fun SettingsClickableRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(icon, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
+            Spacer(Modifier.width(16.dp))
+            Text(label, fontSize = 16.sp, color = TextPrimary)
+        }
+        Icon(Icons.Default.ChevronRight, null, tint = TextSecondary)
     }
 }
 
@@ -224,6 +375,7 @@ fun RemindMeApp(dao: EventDao) {
 @Composable
 fun HomeScreen(navController: NavController, dao: EventDao) {
     val rawEvents by dao.getAllEventsFlow().collectAsState(initial = emptyList())
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
 
@@ -264,6 +416,7 @@ fun HomeScreen(navController: NavController, dao: EventDao) {
             confirmButton = {
                 TextButton(onClick = {
                     coroutineScope.launch(Dispatchers.IO) {
+                        selectedEventIds.forEach { cancelEventAlarm(context, it) }
                         dao.deleteEvents(selectedEventIds.toList())
                         selectedEventIds = emptySet()
                         showDeleteDialog = false
@@ -443,6 +596,9 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
                         }
 
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
+                        DetailRow(Icons.Filled.VolumeUp, "Volume Level", "${(currentEvent.volumeLevel * 100).toInt()}%")
+
+                        HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 16.dp))
                         DetailRow(Icons.Filled.Vibration, "Vibration", if (currentEvent.isVibrationEnabled) "Enabled" else "Disabled")
                     }
                 }
@@ -462,6 +618,7 @@ fun EventDetailsScreen(navController: NavController, dao: EventDao, eventId: Int
     }
 }
 
+// --- MISSING FUNCTION RESTORED HERE ---
 @Composable
 fun DetailRow(icon: ImageVector, label: String, value: String) {
     Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
@@ -502,14 +659,18 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
     var ringtoneUri by remember { mutableStateOf<String?>(null) }
     var showRingtoneSheet by remember { mutableStateOf(false) }
 
-    // --- NEW: Loop Controls State ---
     var isLooping by remember { mutableStateOf(false) }
     var loopCount by remember { mutableStateOf(2) }
+    var volumeLevel by remember { mutableStateOf(1.0f) }
 
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var loudnessEnhancer by remember { mutableStateOf<LoudnessEnhancer?>(null) }
 
     DisposableEffect(Unit) {
-        onDispose { mediaPlayer?.release() }
+        onDispose {
+            loudnessEnhancer?.release()
+            mediaPlayer?.release()
+        }
     }
 
     val ringtoneLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -528,6 +689,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                 isVibrationEnabled = it.isVibrationEnabled; ringtoneUri = it.ringtoneUri
 
                 isLooping = it.isLooping; loopCount = it.loopCount
+                volumeLevel = it.volumeLevel
 
                 customCategoryText = it.customCategory ?: ""
                 calendar.timeInMillis = it.startDateTimeInMillis
@@ -597,6 +759,20 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
 
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 8.dp))
 
+                        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.VolumeUp, null, tint = AccentColor, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(16.dp))
+                            Text("Volume: ${(volumeLevel * 100).toInt()}%", fontSize = 16.sp, color = TextPrimary)
+                        }
+                        Slider(
+                            value = volumeLevel,
+                            onValueChange = { volumeLevel = it },
+                            valueRange = 0f..2f,
+                            colors = SliderDefaults.colors(thumbColor = AccentColor, activeTrackColor = AccentColor, inactiveTrackColor = CardOutline)
+                        )
+
+                        HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 8.dp))
+
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(modifier = Modifier.background(CardOutline, RoundedCornerShape(8.dp)).padding(8.dp)) { Icon(Icons.Filled.Vibration, null, tint = AccentColor, modifier = Modifier.size(20.dp)) }
@@ -609,7 +785,6 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                             )
                         }
 
-                        // --- NEW: LOOP UI CONTROLS ---
                         HorizontalDivider(color = CardOutline, modifier = Modifier.padding(vertical = 8.dp))
 
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -689,7 +864,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                                         id = if (isEditMode) eventId else 0, title = title, category = selectedCategory, startDateTimeInMillis = calendar.timeInMillis, repeatMode = selectedRepeat,
                                         repeatDays = if (selectedRepeat == "Weekly") selectedDays.joinToString(",") else null, notes = notes.takeIf { it.isNotBlank() }, location = location.takeIf { it.isNotBlank() }, invitees = invitees.takeIf { it.isNotBlank() },
                                         isVibrationEnabled = isVibrationEnabled, ringtoneUri = ringtoneUri, customCategory = if (selectedCategory == "Other") customCategoryText.takeIf { it.isNotBlank() } else null,
-                                        isLooping = isLooping, loopCount = loopCount
+                                        isLooping = isLooping, loopCount = loopCount, volumeLevel = volumeLevel
                                     )
                                     val finalId = if (isEditMode) { dao.updateEvent(eventToSave); eventToSave.id } else { dao.insertEvent(eventToSave).toInt() }
                                     val finalEventForAlarm = eventToSave.copy(id = finalId)
@@ -704,11 +879,11 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
             }
         }
 
-        // --- DYNAMIC RINGTONE BOTTOM SHEET ---
         if (showRingtoneSheet) {
             ModalBottomSheet(
                 onDismissRequest = {
                     showRingtoneSheet = false
+                    loudnessEnhancer?.release()
                     mediaPlayer?.let { player ->
                         if (player.isPlaying) player.stop()
                         player.release()
@@ -727,11 +902,11 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                     Text("Select Ringtone", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // 1. PINNED AT TOP: "NONE" OPTION
                     Row(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
                             ringtoneUri = "NONE"
                             showRingtoneSheet = false
+                            loudnessEnhancer?.release()
                             mediaPlayer?.let { if (it.isPlaying) it.stop(); it.release() }
                             mediaPlayer = null
                         }.padding(vertical = 12.dp),
@@ -742,10 +917,10 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                         Text("None (Silent)", fontSize = 16.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
                     }
 
-                    // 2. PINNED AT TOP: SYSTEM RINGTONE BROWSER
                     Row(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
                             showRingtoneSheet = false
+                            loudnessEnhancer?.release()
                             mediaPlayer?.let { if (it.isPlaying) it.stop(); it.release() }
                             mediaPlayer = null
                             val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
@@ -772,7 +947,6 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                     Text("APP TONES", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextSecondary, letterSpacing = 1.sp)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // 3. DYNAMIC APP TONES WITH AUDIO FADE PREVIEW
                     val appTones = getDeveloperRingtones(context)
 
                     if (appTones.isEmpty()) {
@@ -785,6 +959,7 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                                     ringtoneUri = toneUri
 
                                     coroutineScope.launch {
+                                        loudnessEnhancer?.release()
                                         mediaPlayer?.let { player ->
                                             if (player.isPlaying) {
                                                 for (i in 10 downTo 0) {
@@ -797,14 +972,30 @@ fun AddEditEventScreen(navController: NavController, dao: EventDao, eventId: Int
                                         }
 
                                         try {
-                                            val newPlayer = MediaPlayer.create(context, Uri.parse(toneUri))
-                                            mediaPlayer = newPlayer
-                                            newPlayer?.setVolume(0f, 0f)
-                                            newPlayer?.start()
-                                            for (i in 0..10) {
-                                                try { newPlayer?.setVolume(i / 10f, i / 10f) } catch(e: Exception){}
-                                                delay(30)
+                                            val newPlayer = MediaPlayer().apply {
+                                                setAudioAttributes(
+                                                    AudioAttributes.Builder()
+                                                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                                        .setUsage(AudioAttributes.USAGE_ALARM) // Use Alarm Stream for Preview
+                                                        .build()
+                                                )
+                                                setDataSource(context, Uri.parse(toneUri))
+                                                prepare()
                                             }
+
+                                            mediaPlayer = newPlayer
+
+                                            if (volumeLevel > 1.0f) {
+                                                newPlayer.setVolume(1.0f, 1.0f)
+                                                loudnessEnhancer = LoudnessEnhancer(newPlayer.audioSessionId).apply {
+                                                    setTargetGain(((volumeLevel - 1.0f) * 2000).toInt())
+                                                    enabled = true
+                                                }
+                                            } else {
+                                                newPlayer.setVolume(volumeLevel, volumeLevel)
+                                            }
+
+                                            newPlayer.start()
                                         } catch (e: Exception) {
                                             e.printStackTrace()
                                         }

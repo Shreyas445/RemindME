@@ -1,5 +1,7 @@
 package com.example.remindme
 
+import android.app.NotificationManager
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -9,7 +11,6 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -40,7 +41,6 @@ class AlarmActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Force the screen to wake up and display over the lock screen
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -71,10 +71,8 @@ class AlarmActivity : ComponentActivity() {
                 }
             }
 
-            // UI State for expanding the details
             var showDetails by remember { mutableStateOf(false) }
 
-            // Premium Pulsing Animation
             val infiniteTransition = rememberInfiniteTransition(label = "pulse")
             val pulseScale by infiniteTransition.animateFloat(
                 initialValue = 1f, targetValue = 1.3f,
@@ -95,7 +93,6 @@ class AlarmActivity : ComponentActivity() {
                         currentEvent?.category ?: fallbackCategory
                     }
 
-                    // A scrollable column so the details don't get cut off on smaller phones
                     Column(
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(32.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -105,7 +102,6 @@ class AlarmActivity : ComponentActivity() {
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                             Spacer(modifier = Modifier.height(32.dp))
 
-                            // Top: Pulsing Icon
                             Box(contentAlignment = Alignment.Center) {
                                 Box(modifier = Modifier.size(120.dp).scale(pulseScale).clip(CircleShape).background(AccentColor.copy(alpha = pulseAlpha)))
                                 Box(modifier = Modifier.size(100.dp).clip(CircleShape).background(AccentColor.copy(alpha = 0.2f)), contentAlignment = Alignment.Center) {
@@ -117,7 +113,6 @@ class AlarmActivity : ComponentActivity() {
 
                             Spacer(modifier = Modifier.height(24.dp))
 
-                            // Middle: Title and Category
                             Text(displayTitle, fontSize = 42.sp, fontWeight = FontWeight.Black, color = TextPrimary, textAlign = TextAlign.Center, lineHeight = 48.sp)
                             Spacer(modifier = Modifier.height(16.dp))
                             Box(modifier = Modifier.background(AccentColor.copy(alpha = 0.15f), RoundedCornerShape(8.dp)).border(1.dp, AccentColor.copy(alpha = 0.5f), RoundedCornerShape(8.dp)).padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -126,7 +121,6 @@ class AlarmActivity : ComponentActivity() {
 
                             Spacer(modifier = Modifier.height(32.dp))
 
-                            // Inline Details Expansion (Bypasses Lock Screen limitations!)
                             if (currentEvent != null) {
                                 AnimatedVisibility(visible = showDetails, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                                     Card(
@@ -158,7 +152,6 @@ class AlarmActivity : ComponentActivity() {
                             }
                         }
 
-                        // Bottom: Actions
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                             TextButton(onClick = { showDetails = !showDetails }) {
                                 Text(if (showDetails) "Hide Details" else "See Details", fontSize = 16.sp, color = TextSecondary, fontWeight = FontWeight.Medium)
@@ -170,7 +163,14 @@ class AlarmActivity : ComponentActivity() {
 
                             Button(
                                 onClick = {
+                                    // 1. Kill the audio
                                     AlarmReceiver.stopAlarmAudio(this@AlarmActivity, eventId)
+
+                                    // 2. FIX: Destroy the notification from the tray because the user actively stopped it
+                                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                                    notificationManager.cancel(eventId)
+
+                                    // 3. Close screen
                                     finish()
                                 },
                                 modifier = Modifier.fillMaxWidth().height(80.dp),

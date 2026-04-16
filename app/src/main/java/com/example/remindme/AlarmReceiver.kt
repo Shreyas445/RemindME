@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -18,9 +19,13 @@ class AlarmReceiver : BroadcastReceiver() {
     companion object {
         var mediaPlayer: MediaPlayer? = null
         var wakeLock: PowerManager.WakeLock? = null
+        var loudnessEnhancer: LoudnessEnhancer? = null
 
         fun stopAlarmAudio(context: Context, eventId: Int) {
             try {
+                loudnessEnhancer?.release()
+                loudnessEnhancer = null
+
                 if (mediaPlayer?.isPlaying == true) mediaPlayer?.stop()
                 mediaPlayer?.release()
                 mediaPlayer = null
@@ -31,8 +36,8 @@ class AlarmReceiver : BroadcastReceiver() {
                 wakeLock = null
             } catch (e: Exception) {}
 
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.cancel(eventId)
+            // FIX: We NO LONGER cancel the notification here!
+            // It will stay in the tray until the user swipes it away.
         }
     }
 
@@ -45,34 +50,27 @@ class AlarmReceiver : BroadcastReceiver() {
 
         val isLooping = intent.getBooleanExtra("EVENT_IS_LOOPING", false)
         val loopCount = intent.getIntExtra("EVENT_LOOP_COUNT", 1)
+        val volumeLevel = intent.getFloatExtra("EVENT_VOLUME", 1.0f)
 
-        // Clean up any old alarms just in case of a double-fire
         stopAlarmAudio(context, eventId)
 
-        // --- 1. THE POWER GRAB ---
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RemindMe::AlarmAudioWakeLock")
-        wakeLock?.acquire(3 * 60 * 1000L) // 3 Minute absolute maximum
+        wakeLock?.acquire(3 * 60 * 1000L)
 
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-        // Use a brand new channel ID based purely on vibration to force the OS to forget old sound settings
-        val channelId = "remindme_silent_alarm_v3_$vibrationEnabled"
+        val channelId = "remindme_silent_alarm_v4_$vibrationEnabled"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(channelId, "Event Alarms", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "High priority alarms for events"
-
-                // FORCE THE OS CHANNEL TO BE SILENT. WE HANDLE AUDIO MANUALLY.
                 setSound(null, null)
-
                 enableVibration(vibrationEnabled)
                 if (vibrationEnabled) vibrationPattern = longArrayOf(0, 500, 500, 500)
             }
             notificationManager.createNotificationChannel(channel)
         }
 
-        // --- 2. LAUNCH THE DEDICATED ALARM SCREEN ---
         val openAlarmIntent = Intent(context, AlarmActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             putExtra("EVENT_ID", eventId)
@@ -83,22 +81,44 @@ class AlarmReceiver : BroadcastReceiver() {
 
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
+            .setColor(android.graphics.Color.parseColor("#FFC107"))
             .setContentTitle("It's Time!")
             .setContentText(title)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-            .setFullScreenIntent(pendingIntent, true) // Wakes the screen!
+            .setFullScreenIntent(pendingIntent, true)
             .build()
 
+        // This pushes the notification to the tray where it will stay!
         notificationManager.notify(eventId, notification)
 
-        // --- 3. 100% MANUAL AUDIO CONTROL ---
         if (ringtoneUriString != "NONE" && !ringtoneUriString.isNullOrBlank()) {
             try {
                 val uri = Uri.parse(ringtoneUriString)
-                mediaPlayer = MediaPlayer.create(context, uri)
+
+                mediaPlayer = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .build()
+                    )
+                    setDataSource(context, uri)
+                    prepare()
+                }
+
+                if (volumeLevel > 1.0f) {
+                    mediaPlayer?.setVolume(1.0f, 1.0f)
+                    try {
+                        loudnessEnhancer = LoudnessEnhancer(mediaPlayer!!.audioSessionId)
+                        loudnessEnhancer?.setTargetGain(((volumeLevel - 1.0f) * 2000).toInt())
+                        loudnessEnhancer?.enabled = true
+                    } catch (e: Exception) {}
+                } else {
+                    mediaPlayer?.setVolume(volumeLevel, volumeLevel)
+                }
 
                 if (isLooping) {
                     var playsCompleted = 0
@@ -112,7 +132,6 @@ class AlarmReceiver : BroadcastReceiver() {
                         }
                     }
                 } else {
-                    // Even if it's not looping, we let MediaPlayer play it exactly once then kill the battery lock
                     mediaPlayer?.setOnCompletionListener {
                         stopAlarmAudio(context, eventId)
                     }
@@ -129,7 +148,6 @@ class AlarmReceiver : BroadcastReceiver() {
                 e.printStackTrace()
             }
         } else {
-            // If the user selected "None", release the battery lock immediately
             if (wakeLock?.isHeld == true) wakeLock?.release()
         }
     }

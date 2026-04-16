@@ -18,8 +18,9 @@ data class Event(
 
     val isVibrationEnabled: Boolean = true,
     val ringtoneUri: String? = null,
-
-    // --- NEW: Loop Settings ---
     val isLooping: Boolean = false,
-    val loopCount: Int = 2
+    val loopCount: Int = 2,
+
+    // --- NEW: Volume Memory (0.0f to 2.0f) ---
+    val volumeLevel: Float = 1.0f
 )
