@@ -10,8 +10,8 @@ data class Event(
     val category: String,
     val customCategory: String? = null,
     val startDateTimeInMillis: Long,
-    val repeatMode: String, // "None", "Daily", "Weekly", "Monthly", "Yearly"
-    val repeatDays: String? = null, // Stored as comma-separated days for weekly
+    val repeatMode: String,
+    val repeatDays: String? = null,
     val notes: String? = null,
     val location: String? = null,
     val invitees: String? = null,
@@ -22,7 +22,8 @@ data class Event(
     val isLooping: Boolean = false,
     val loopCount: Int = 1,
     val volumeLevel: Float = 1.0f,
+    val alertBefore: String = "None",
 
-    // --- NEW: PRE-ALERT FEATURE ---
-    val alertBefore: String = "None" // "None", "30 mins", "1 hour", "1 day"
+    // --- NEW: HEAVY SLEEPER ---
+    val dismissMethod: String = "Default" // "Default" or "Math Problem"
 )

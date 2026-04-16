@@ -13,6 +13,12 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.example.remindme.db.AppDatabase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import java.util.Calendar
 
 class AlarmReceiver : BroadcastReceiver() {
 
@@ -25,7 +31,6 @@ class AlarmReceiver : BroadcastReceiver() {
             try {
                 loudnessEnhancer?.release()
                 loudnessEnhancer = null
-
                 if (mediaPlayer?.isPlaying == true) mediaPlayer?.stop()
                 mediaPlayer?.release()
                 mediaPlayer = null
@@ -39,12 +44,6 @@ class AlarmReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        val eventId = intent.getIntExtra("EVENT_ID", -1)
-        val title = intent.getStringExtra("EVENT_TITLE") ?: "Event Reminder"
-        val category = intent.getStringExtra("EVENT_CATEGORY") ?: "Event"
-        val isPreAlert = intent.getBooleanExtra("IS_PRE_ALERT", false)
-        val alertBeforeStr = intent.getStringExtra("ALERT_BEFORE_STR") ?: ""
-
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "remindme_alarms_v5"
 
@@ -56,8 +55,66 @@ class AlarmReceiver : BroadcastReceiver() {
         }
 
         // ==========================================
-        // 🧠 THE INTELLIGENT PRE-ALERT LOGIC
+        // 🌅 THE DAILY MORNING BRIEFING LOGIC
         // ==========================================
+        if (intent.getBooleanExtra("IS_DAILY_BRIEFING", false)) {
+            val pendingResult = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val db = AppDatabase.getDatabase(context)
+                    val allEvents = db.eventDao().getAllEventsFlow().first()
+
+                    // Find bounds for "Today"
+                    val todayStart = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+                    val todayEnd = todayStart + (24 * 60 * 60 * 1000)
+
+                    // Filter events happening today
+                    val todaysEvents = allEvents.filter { event ->
+                        val nextTrigger = getNextOccurrence(event)
+                        nextTrigger in todayStart until todayEnd
+                    }
+
+                    if (todaysEvents.isNotEmpty()) {
+                        val title = "Good Morning! ☀️"
+                        val text = "You have ${todaysEvents.size} event(s) today, including: ${todaysEvents.first().title}"
+
+                        val openAppIntent = Intent(context, MainActivity::class.java)
+                        val pendingIntent = PendingIntent.getActivity(context, 999999, openAppIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+                        val notification = NotificationCompat.Builder(context, channelId)
+                            .setSmallIcon(android.R.drawable.ic_popup_reminder)
+                            .setColor(android.graphics.Color.parseColor("#FFC107"))
+                            .setContentTitle(title)
+                            .setContentText(text)
+                            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                            .setAutoCancel(true)
+                            .setContentIntent(pendingIntent)
+                            .build()
+
+                        notificationManager.notify(999999, notification)
+                    }
+
+                    // Reschedule for tomorrow morning
+                    scheduleDailyBriefing(context)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    pendingResult.finish()
+                }
+            }
+            return // Stop here!
+        }
+
+        // ==========================================
+        // 🧠 THE PRE-ALERT LOGIC
+        // ==========================================
+        val eventId = intent.getIntExtra("EVENT_ID", -1)
+        val title = intent.getStringExtra("EVENT_TITLE") ?: "Event Reminder"
+        val category = intent.getStringExtra("EVENT_CATEGORY") ?: "Event"
+        val isPreAlert = intent.getBooleanExtra("IS_PRE_ALERT", false)
+        val alertBeforeStr = intent.getStringExtra("ALERT_BEFORE_STR") ?: ""
+        val dismissMethod = intent.getStringExtra("EVENT_DISMISS_METHOD") ?: "Default"
+
         if (isPreAlert) {
             val smartTitle = when (alertBeforeStr) {
                 "1 day" -> "Tomorrow"
@@ -74,7 +131,6 @@ class AlarmReceiver : BroadcastReceiver() {
                 else -> "$title is $smartTitle"
             }
 
-            // Create a standard, quiet tap-to-open notification
             val openAppIntent = Intent(context, MainActivity::class.java)
             val pendingIntent = PendingIntent.getActivity(context, eventId + 500000, openAppIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
@@ -88,9 +144,8 @@ class AlarmReceiver : BroadcastReceiver() {
                 .setContentIntent(pendingIntent)
                 .build()
 
-            // We use a different ID so it doesn't overwrite the main alarm notification later!
             notificationManager.notify(eventId + 500000, notification)
-            return // <--- STOP HERE. Do not play the loud alarm music!
+            return
         }
 
         // ==========================================
@@ -113,6 +168,7 @@ class AlarmReceiver : BroadcastReceiver() {
             putExtra("EVENT_ID", eventId)
             putExtra("EVENT_TITLE", title)
             putExtra("EVENT_CATEGORY", category)
+            putExtra("EVENT_DISMISS_METHOD", dismissMethod)
         }
         val pendingIntent = PendingIntent.getActivity(context, eventId, openAlarmIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
