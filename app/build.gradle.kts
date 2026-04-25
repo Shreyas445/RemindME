@@ -71,4 +71,6 @@ dependencies {
     implementation("androidx.glance:glance-appwidget:$glanceVersion")
     implementation("androidx.glance:glance-material3:$glanceVersion")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    // Google ML Kit (Free On-Device NLP)
+    implementation("com.google.mlkit:entity-extraction:16.0.0-beta5")
 }
